@@ -12,16 +12,16 @@ app = Flask(__name__)
 app.secret_key = "tu_clave_secreta"
 
 # Configuración
-WHATSAPP_NUMBER = "593979111576"
-MAX_TEMP = 40  
+WHATSAPP_NUMBER = "593981953600"
+MAX_TEMP = 30  
 SERIAL_PORT = None  
 SERIAL_BAUDRATE = 9600
 
 # Variables de control
 lecturas_activas = False
-temp_history = deque(maxlen=7)
-hum_history = deque(maxlen=7)
-lecturas_realtime = deque(maxlen=7)
+temp_history = deque(maxlen=6)
+hum_history = deque(maxlen=6)
+lecturas_realtime = deque(maxlen=6)
 
 # Conexión a la base de datos
 def get_db_connection():
@@ -42,7 +42,6 @@ BASE_HTML = """
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@3.7.0/dist/chart.min.js"></script>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
   <style>
     .card {
       margin-bottom: 20px;
@@ -358,10 +357,7 @@ def index():
         <div class="card">
           <div class="card-body text-center">
             <h5 class="card-title">Sensores</h5>
-            <br>
-            <a href="/ver_sensores" class="btn btn-primary">
-              <i class="bi bi-gear"></i> Ver Sensores
-            </a>
+            <a href="/ver_sensores" class="btn btn-primary">Ver Sensores</a>
           </div>
         </div>
       </div>
@@ -369,10 +365,7 @@ def index():
         <div class="card">
           <div class="card-body text-center">
             <h5 class="card-title">Lecturas</h5>
-            <br>
-            <a href="/monitoreo" class="btn btn-success">
-              <i class="bi bi-graph-up"></i> Monitoreo
-            </a>
+            <a href="/monitoreo" class="btn btn-success">Monitoreo</a>
           </div>
         </div>
       </div>
@@ -380,10 +373,7 @@ def index():
         <div class="card">
           <div class="card-body text-center">
             <h5 class="card-title">Alertas</h5>
-            <br>
-            <a href="/ver_alertas" class="btn btn-warning">
-              <i class="bi bi-exclamation-triangle"></i> Ver Alertas
-            </a>
+            <a href="/ver_alertas" class="btn btn-warning">Ver Alertas</a>
           </div>
         </div>
       </div>
