@@ -11,19 +11,20 @@ from datetime import timedelta
 app = Flask(__name__)
 app.secret_key = "tu_clave_secreta"
 
-# Configuración
-WHATSAPP_NUMBER = "593981953600"
+
+WHATSAPP_NUMBER = "593979111576"
 MAX_TEMP = 30  
 SERIAL_PORT = None  
 SERIAL_BAUDRATE = 9600
 
-# Variables de control
+
 lecturas_activas = False
 temp_history = deque(maxlen=6)
 hum_history = deque(maxlen=6)
+soil_moisture_history = deque(maxlen=6)
 lecturas_realtime = deque(maxlen=6)
 
-# Conexión a la base de datos
+
 def get_db_connection():
     return mysql.connector.connect(
         host="localhost",
@@ -32,7 +33,7 @@ def get_db_connection():
         database="db_invernadero"
     )
 
-# Plantilla base con Bootstrap y Chart.js
+
 BASE_HTML = """
 <!doctype html>
 <html lang="es">
@@ -56,6 +57,15 @@ BASE_HTML = """
     .alert-temperature {
       color: #dc3545;
       font-weight: bold;
+    }
+    .soil-dry {
+      color: #dc3545; /* Rojo para suelo seco */
+    }
+    .soil-moist {
+      color: #ffc107; /* Amarillo para suelo húmedo */
+    }
+    .soil-wet {
+      color: #198754; /* Verde para suelo mojado */
     }
   </style>
 </head>
@@ -156,13 +166,28 @@ BASE_HTML = """
   <script>
     let tempChart, humChart;
 
-    function crearGraficas(fechas, temperaturas, humedades) {
+    // Función para determinar la clase CSS según el valor de humedad del suelo
+    function getSoilMoistureClass(value) {
+      if (value > 800) return 'soil-dry';
+      if (value > 400) return 'soil-moist';
+      return 'soil-wet';
+    }
+
+    // Función para interpretar el estado del suelo
+    function interpretSoilMoisture(value) {
+      if (value > 800) return 'SECO';
+      if (value > 400) return 'HÚMEDO';
+      return 'MOJADO';
+    }
+
+    function crearGraficas(fechas, temperaturas, humedadesSuelo) {
       const ctxTemp = document.getElementById('tempChart').getContext('2d');
       const ctxHum = document.getElementById('humChart').getContext('2d');
 
       if (tempChart) tempChart.destroy();
       if (humChart) humChart.destroy();
 
+      // Gráfica de temperatura (se mantiene igual)
       tempChart = new Chart(ctxTemp, {
         type: 'line',
         data: {
@@ -190,15 +215,16 @@ BASE_HTML = """
         }
       });
 
+      // Nueva gráfica para humedad del suelo
       humChart = new Chart(ctxHum, {
         type: 'line',
         data: {
           labels: fechas,
           datasets: [{
-            label: 'Humedad (%)',
-            data: humedades,
-            borderColor: 'rgb(54, 162, 235)',
-            backgroundColor: 'rgba(54, 162, 235, 0.1)',
+            label: 'Humedad del Suelo (raw)',
+            data: humedadesSuelo,
+            borderColor: 'rgb(75, 192, 192)',
+            backgroundColor: 'rgba(75, 192, 192, 0.1)',
             tension: 0.1,
             fill: true
           }]
@@ -208,12 +234,32 @@ BASE_HTML = """
           scales: {
             y: {
               min: 0,
-              max: 100,
-              title: { display: true, text: 'Humedad (%)' }
+              max: 1023,
+              title: { display: true, text: 'Humedad Suelo (raw 0-1023)' },
+              ticks: {
+                callback: function(value) {
+                  // Mostrar el estado interpretado en los ticks
+                  if (value === 0) return '0 (MOJADO)';
+                  if (value === 400) return '400 (HÚMEDO)';
+                  if (value === 800) return '800 (SECO)';
+                  if (value === 1023) return '1023 (MUY SECO)';
+                  return value;
+                }
+              }
             },
             x: {
               title: { display: true, text: 'Hora' },
               ticks: { maxRotation: 45, minRotation: 45 }
+            }
+          },
+          plugins: {
+            tooltip: {
+              callbacks: {
+                afterLabel: function(context) {
+                  const value = context.raw;
+                  return `Estado: ${interpretSoilMoisture(value)}`;
+                }
+              }
             }
           }
         }
@@ -230,10 +276,13 @@ BASE_HTML = """
           data.slice().reverse().forEach(lectura => {
             const tr = document.createElement('tr');
             const tempClass = lectura.temperatura > {{ MAX_TEMP }} ? 'alert-temperature' : '';
+            const soilClass = getSoilMoistureClass(lectura.humedad_suelo);
+            const soilStatus = interpretSoilMoisture(lectura.humedad_suelo);
+            
             tr.innerHTML = `
               <td>${lectura.fecha}</td>
               <td class="${tempClass}">${lectura.temperatura}</td>
-              <td>${lectura.humedad}</td>
+              <td class="${soilClass}" title="${soilStatus}">${lectura.humedad_suelo}</td>
             `;
             tbody.appendChild(tr);
           });
@@ -241,9 +290,9 @@ BASE_HTML = """
           // Preparar datos para gráficas
           const fechas = data.map(l => l.fecha);
           const temperaturas = data.map(l => l.temperatura);
-          const humedades = data.map(l => l.humedad);
+          const humedadesSuelo = data.map(l => l.humedad_suelo);
 
-          crearGraficas(fechas, temperaturas, humedades);
+          crearGraficas(fechas, temperaturas, humedadesSuelo);
         })
         .catch(err => {
           console.error('Error al obtener lecturas en tiempo real:', err);
@@ -262,7 +311,7 @@ BASE_HTML = """
 def leer_arduino():
     global SERIAL_PORT, lecturas_activas, lecturas_realtime, alerta_enviada
 
-    alerta_enviada = False  # bandera para evitar alertas duplicadas
+    alerta_enviada = False
 
     while True:
         try:
@@ -286,57 +335,75 @@ def leer_arduino():
 
             if SERIAL_PORT.in_waiting > 0:
                 line = SERIAL_PORT.readline().decode('utf-8', errors='ignore').strip()
-                if line and "Temperatura:" in line and "Humedad:" in line:
+                if line and "Temperatura:" in line and "Humedad Ambiental:" in line and "Humedad del Suelo (raw):" in line:
                     try:
                         temp = float(line.split("Temperatura:")[1].split("°C")[0].strip())
-                        hum = float(line.split("Humedad:")[1].split("%")[0].strip())
+                        humedad_raw_str = line.split("Humedad del Suelo (raw):")[1].split(",")[0].strip()
+                        humedad_suelo = int(humedad_raw_str)
 
-                        # Agregar lectura en tiempo real
+                        
+                        if humedad_suelo > 800:
+                            estado_suelo = "SECO"
+                        elif humedad_suelo > 400:
+                            estado_suelo = "HÚMEDO"
+                        else:
+                            estado_suelo = "MOJADO"
+
+                        
                         lecturas_realtime.append({
                             "fecha": datetime.now(),
                             "temperatura": temp,
-                            "humedad": hum
+                            "humedad_suelo": humedad_suelo,
+                            "estado_suelo": estado_suelo
                         })
 
-                        if temp > MAX_TEMP:
-                            if not alerta_enviada:
-                                alerta_enviada = True  # marcar que ya se envió la alerta
-                                conn = None
-                                cursor = None
-                                try:
-                                    conn = get_db_connection()
-                                    cursor = conn.cursor()
+                        conn = get_db_connection()
+                        cursor = conn.cursor()
 
-                                    # Insertar lectura
-                                    cursor.execute("""
-                                        INSERT INTO lecturas (id_sensor, temperatura, humedad)
-                                        VALUES (%s, %s, %s)
-                                    """, (1, temp, hum))
+                        registrar_alerta = False
+                        tipo_alerta = ""
+                        descripcion_alerta = ""
 
-                                    # Insertar alerta
-                                    descripcion_alerta = f"Temperatura crítica: {temp}°C, Humedad: {hum}%"
-                                    cursor.execute("""
-                                        INSERT INTO alertas (id_sensor, tipo_alerta, descripcion)
-                                        VALUES (%s, %s, %s)
-                                    """, (1, "Temperatura Alta", descripcion_alerta))
+                        
+                        if not alerta_enviada:
+                            if temp > MAX_TEMP:
+                                tipo_alerta = "Temperatura Alta"
+                                descripcion_alerta = f"Temperatura crítica: {temp}°C, Suelo: {humedad_suelo} ({estado_suelo})"
+                                registrar_alerta = True
+                            elif humedad_suelo > 800:
+                                tipo_alerta = "Suelo Seco"
+                                descripcion_alerta = f"Suelo seco detectado: {humedad_suelo} ({estado_suelo})"
+                                registrar_alerta = True
 
-                                    conn.commit()
-                                    print(f"[INFO] Alerta registrada: {descripcion_alerta}")
-                                except Exception as e:
-                                    print(f"[ERROR] BD: {e}")
-                                finally:
-                                    if cursor:
-                                        cursor.close()
-                                    if conn:
-                                        conn.close()
-                        else:
-                            # Si baja la temperatura, se permite futura alerta
-                            if alerta_enviada:
-                                print("[INFO] Temperatura normalizada. Reiniciando alerta.")
+                        if registrar_alerta:
+                            
+                            cursor.execute("""
+                                INSERT INTO lecturas (id_sensor, temperatura, humedad_suelo)
+                                VALUES (%s, %s, %s)
+                            """, (1, temp, humedad_suelo))
+
+                            
+                            cursor.execute("""
+                                INSERT INTO alertas (id_sensor, tipo_alerta, descripcion)
+                                VALUES (%s, %s, %s)
+                            """, (1, tipo_alerta, descripcion_alerta))
+
+                            conn.commit()
+                            alerta_enviada = True
+                            print(f"[ALERTA] {descripcion_alerta}")
+
+                        
+                        elif alerta_enviada and temp <= MAX_TEMP and humedad_suelo <= 800:
+                            print("[INFO] Valores normalizados. Se puede registrar nueva alerta.")
                             alerta_enviada = False
 
                     except Exception as e:
                         print(f"[ERROR] Procesando datos: {e}")
+                    finally:
+                        if cursor:
+                            cursor.close()
+                        if conn:
+                            conn.close()
 
         except serial.SerialException as e:
             print(f"[ERROR] Serial: {e}")
@@ -347,6 +414,7 @@ def leer_arduino():
         except Exception as e:
             print(f"[ERROR] Inesperado: {e}")
             time.sleep(5)
+
 
 @app.route("/")
 def index():
@@ -508,37 +576,25 @@ def monitoreo():
     global lecturas_activas
     lecturas_activas = True
 
-    lectura_alerta = None
-    ultima_lectura_alta = None
-
     conn = None
     cursor = None
+    lecturas_a_mostrar = []
+
     try:
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
 
-        # Obtener la última lectura que generó una alerta
+        
         cursor.execute("""
-            SELECT l.*, s.ubicacion 
+            SELECT l.*, a.tipo_alerta, a.descripcion, s.ubicacion 
             FROM alertas a
-            JOIN lecturas l ON a.id_sensor = l.id_sensor AND DATE_FORMAT(a.fecha, '%Y-%m-%d %H:%i:%s') = DATE_FORMAT(l.fecha, '%Y-%m-%d %H:%i:%s')
+            JOIN lecturas l ON a.id_sensor = l.id_sensor 
+                AND DATE_FORMAT(a.fecha, '%Y-%m-%d %H:%i:%s') = DATE_FORMAT(l.fecha, '%Y-%m-%d %H:%i:%s')
             JOIN sensores s ON l.id_sensor = s.id_sensor
-            WHERE a.tipo_alerta = 'Temperatura Alta'
             ORDER BY a.fecha DESC
-            LIMIT 1
+            LIMIT 2
         """)
-        lectura_alerta = cursor.fetchone()
-
-        # Obtener la última lectura con temperatura > MAX_TEMP
-        cursor.execute("""
-            SELECT l.*, s.ubicacion 
-            FROM lecturas l
-            JOIN sensores s ON l.id_sensor = s.id_sensor
-            WHERE l.temperatura > %s
-            ORDER BY l.fecha DESC 
-            LIMIT 1
-        """, (MAX_TEMP,))
-        ultima_lectura_alta = cursor.fetchone()
+        lecturas_a_mostrar = cursor.fetchall()
 
     except Exception as e:
         flash(f"Error al obtener lecturas altas: {str(e)}")
@@ -548,13 +604,7 @@ def monitoreo():
         if conn:
             conn.close()
 
-    # Preparar lista sin duplicados
-    lecturas_a_mostrar = []
-    if lectura_alerta:
-        lecturas_a_mostrar.append(lectura_alerta)
-    if ultima_lectura_alta and (not lectura_alerta or ultima_lectura_alta['id_lectura'] != lectura_alerta['id_lectura']):
-        lecturas_a_mostrar.append(ultima_lectura_alta)
-
+    # =================== TABLA EN TIEMPO REAL ===================
     tabla_realtime = """
     <div class="card mb-4">
       <div class="card-header bg-primary text-white">
@@ -563,7 +613,7 @@ def monitoreo():
       <div class="card-body table-responsive">
         <table id="tabla-realtime" class="table table-striped">
           <thead>
-            <tr><th>Fecha</th><th>Temperatura (°C)</th><th>Humedad (%)</th></tr>
+            <tr><th>Fecha</th><th>Temperatura (°C)</th><th>Humedad Suelo (raw)</th></tr>
           </thead>
           <tbody></tbody>
         </table>
@@ -572,26 +622,36 @@ def monitoreo():
     <hr>
     """
 
+    # =================== TABLA DE ALERTAS RECIENTES ===================
     tabla_altas = """
     <div class="card">
       <div class="card-header bg-warning text-dark">
-        <h5 class="mb-0">Últimas Lecturas con Temperatura Alta</h5>
+        <h5 class="mb-0">Últimas Lecturas con Alertas</h5>
       </div>
       <div class="card-body table-responsive">
         <table class="table table-striped">
           <thead>
-            <tr><th>Fecha</th><th>Temperatura (°C)</th><th>Humedad (%)</th><th>Ubicación</th></tr>
+            <tr><th>Fecha</th><th>Tipo</th><th>Temperatura (°C)</th><th>Humedad Suelo</th><th>Ubicación</th></tr>
           </thead>
           <tbody>
     """
 
     for la in lecturas_a_mostrar:
         fecha_local = la['fecha'] - timedelta(hours=5)
+        soil_class = ""
+        if la['humedad_suelo'] > 800:
+            soil_class = 'soil-dry'
+        elif la['humedad_suelo'] > 400:
+            soil_class = 'soil-moist'
+        else:
+            soil_class = 'soil-wet'
+
         tabla_altas += f"""
           <tr>
             <td>{fecha_local.strftime('%Y-%m-%d %H:%M:%S')}</td>
+            <td>{la.get('tipo_alerta', 'Desconocida')}</td>
             <td class="alert-temperature">{la['temperatura']}</td>
-            <td>{la['humedad']}</td>
+            <td class="{soil_class}">{la['humedad_suelo']}</td>
             <td>{la['ubicacion']}</td>
           </tr>
         """
@@ -603,6 +663,7 @@ def monitoreo():
     </div>
     """
 
+    # =================== GRÁFICAS ===================
     graficos = """
     <div class="row mt-4">
       <div class="col-md-6">
@@ -615,7 +676,7 @@ def monitoreo():
       </div>
       <div class="col-md-6">
         <div class="card">
-          <div class="card-header bg-info text-white">Gráfica de Humedad</div>
+          <div class="card-header bg-info text-white">Gráfica de Humedad del Suelo</div>
           <div class="card-body">
             <canvas id="humChart" width="400" height="300"></canvas>
           </div>
@@ -637,24 +698,26 @@ def monitoreo():
         humedades=[]
     )
 
-
 @app.route("/ver_alertas")
 def ver_alertas():
-    alerta = None
     conn = None
     cursor = None
+    alertas = []
+
     try:
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
+
+        
         cursor.execute("""
             SELECT a.*, s.ubicacion 
             FROM alertas a
             JOIN sensores s ON a.id_sensor = s.id_sensor
-            WHERE a.tipo_alerta = 'Temperatura Alta'
-            ORDER BY CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(a.descripcion, ' ', -2), '°C', 1) AS DECIMAL(5,2)) DESC
-            LIMIT 1
+            ORDER BY a.fecha DESC
+            LIMIT 2
         """)
-        alerta = cursor.fetchone()
+        alertas = cursor.fetchall()
+
     except Exception as e:
         flash(f"Error al obtener alertas: {str(e)}")
     finally:
@@ -663,7 +726,7 @@ def ver_alertas():
         if conn:
             conn.close()
 
-    if not alerta:
+    if not alertas:
         contenido = "<div class='alert alert-info'>No hay alertas activas.</div>"
         return render_template_string(BASE_HTML, titulo="Alertas", contenido=contenido, fechas=[], temperaturas=[], humedades=[])
 
@@ -671,7 +734,7 @@ def ver_alertas():
     <hr>
     <div class="card">
       <div class="card-header bg-warning text-dark">
-        <h5 class="mb-0">Alerta Crítica Más Reciente</h5>
+        <h5 class="mb-0">Alertas Críticas Recientes</h5>
       </div>
       <div class="card-body table-responsive">
         <table class="table table-striped">
@@ -679,8 +742,13 @@ def ver_alertas():
             <tr><th>Fecha</th><th>Tipo</th><th>Descripción</th><th>Ubicación</th><th>Acciones</th></tr>
           </thead>
           <tbody>
+    """
+
+    for alerta in alertas:
+        fecha_local = alerta['fecha'] - timedelta(hours=5)
+        tabla += f"""
             <tr>
-              <td>{(alerta['fecha'] - timedelta(hours=5)).strftime('%Y-%m-%d %H:%M:%S')}</td>
+              <td>{fecha_local.strftime('%Y-%m-%d %H:%M:%S')}</td>
               <td>{alerta['tipo_alerta']}</td>
               <td>{alerta['descripcion']}</td>
               <td>{alerta['ubicacion']}</td>
@@ -688,6 +756,9 @@ def ver_alertas():
                 <button class="btn btn-success btn-sm" onclick="enviarAlerta('{alerta['id_alerta']}')">WhatsApp</button>
               </td>
             </tr>
+        """
+
+    tabla += """
           </tbody>
         </table>
       </div>
@@ -744,7 +815,7 @@ def generar_enlace_whatsapp(id):
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
 
-        # Obtener la alerta
+        
         cursor.execute("""
             SELECT a.*, s.ubicacion 
             FROM alertas a 
@@ -756,22 +827,19 @@ def generar_enlace_whatsapp(id):
         if not alerta:
             return jsonify({"error": "No se encontró alerta con ese ID"}), 404
 
-        # Generar el mensaje
         fecha_local = alerta['fecha'] - timedelta(hours=5)
         mensaje = (
-            "*ALERTA DE INVERNADERO*\n\n"
-            f"*Sensor*: {alerta['id_sensor']} - {alerta['ubicacion']}\n"
+            "*ALERTA DEl INVERNADERO NUMERO UNO*\n\n"
+            f"*Sensor*: {alerta['ubicacion']}\n"
             f"*Tipo*: {alerta['tipo_alerta']} en {alerta['ubicacion']}\n"
             f"*Descripción*: {alerta['descripcion']}\n"
             f"*Fecha*: {fecha_local.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
             "Este es un mensaje automático del sistema de monitoreo."
         )
-
-        # Eliminar la alerta (usa mismo cursor)
+        
         cursor.execute("DELETE FROM alertas WHERE id_alerta = %s", (id,))
         conn.commit()
-
-        # Enlace WhatsApp
+        
         url = f"https://wa.me/{WHATSAPP_NUMBER}?text={mensaje.replace(' ', '%20').replace(chr(10), '%0A')}"
         return jsonify({"url": url})
 
@@ -791,7 +859,7 @@ def api_lecturas_realtime():
     data = [{
         "fecha": l["fecha"].strftime('%Y-%m-%d %H:%M:%S'),
         "temperatura": l["temperatura"],
-        "humedad": l["humedad"]
+        "humedad_suelo": l["humedad_suelo"]
     } for l in list(lecturas_realtime)]
     return jsonify(data)
 
