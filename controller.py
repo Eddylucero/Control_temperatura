@@ -765,8 +765,7 @@ def detalle_invernadero(invernadero_id):
       </div>
     </div>
     """
-
-    # Añadir script para manejar la salida de la página
+    
     exit_script = """
     <script>
     window.addEventListener('beforeunload', function() {
