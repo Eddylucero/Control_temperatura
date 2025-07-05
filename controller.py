@@ -1,31 +1,38 @@
-from flask import Flask, request, render_template_string, redirect, url_for, flash, jsonify
+from flask import Flask, request, jsonify, render_template_string, flash, redirect, url_for
 import mysql.connector
 from datetime import datetime
-import serial
-import serial.tools.list_ports
-import threading
-import time
 from collections import deque
-from datetime import timedelta
 
 app = Flask(__name__)
 app.secret_key = "tu_clave_secreta"
 
+# Configuración
+INVERNADEROS = {
+    1: "Invernadero de Rosas",
+    2: "Invernadero de Claveles", 
+    3: "Invernadero de Hortensias",
+    4: "Invernadero de Tulipanes",
+    5: "Invernadero de Geranios"
+}
 
-WHATSAPP_NUMBER = "593979111576"
-MAX_TEMP = 30  
-SERIAL_PORT = None  
-SERIAL_BAUDRATE = 9600
+ALERT_TEMP = 40  # Umbral de temperatura para alertas
 
+ultimas_lecturas = {invernadero_id: None for invernadero_id in INVERNADEROS.keys()}
 
-lecturas_activas = False
-temp_history = deque(maxlen=6)
-hum_history = deque(maxlen=6)
-soil_moisture_history = deque(maxlen=6)
-lecturas_realtime = deque(maxlen=6)
+def estado_suelo(humedad):
+    if humedad is None:
+        return "Sin datos"
+    if humedad < 30:
+        return "Muy seco"
+    elif humedad < 60:
+        return "Seco"
+    elif humedad < 80:
+        return "Húmedo"
+    else:
+        return "Muy húmedo"
 
-
-def get_db_connection():
+# Conexión a la base de datos
+def get_db():
     return mysql.connector.connect(
         host="localhost",
         user="root",
@@ -33,839 +40,840 @@ def get_db_connection():
         database="db_invernadero"
     )
 
-
+# HTML Base
 BASE_HTML = """
 <!doctype html>
-<html lang="es">
+<html>
 <head>
-  <meta charset="utf-8">
-  <title>{{ titulo }}</title>
+  <title>{{ title }}</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-  <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@3.7.0/dist/chart.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
-    .card {
-      margin-bottom: 20px;
-      box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+    .dashboard-card { 
+      transition: all 0.3s; 
+      height: 100%; 
     }
-    .card-header {
-      font-weight: bold;
+    .dashboard-card:hover { 
+      transform: scale(1.02); 
+      box-shadow: 0 0 15px rgba(0,0,0,0.2); 
     }
-    .table-responsive {
+    .card-title { 
+      font-size: 1.2rem; 
+      font-weight: bold; 
+    }
+    .alert-row { 
+      transition: all 0.3s; 
+    }
+    .alert-row:hover { 
+      background-color: #f8f9fa; 
+    }
+    .critical-temp { 
+      color: #dc3545; 
+      font-weight: bold; 
+    }
+    .chart-container { 
+      position: relative; 
+      height: 300px; 
+      width: 100%; 
+    }
+    .text-danger { color: #dc3545; }
+    .text-warning { color: #ffc107; }
+    .text-primary { color: #0d6efd; }
+    .text-success { color: #198754; }
+    .badge.bg-danger { background-color: #dc3545; }
+    .table-responsive { 
       overflow-x: auto;
+      max-height: 400px;
     }
-    .alert-temperature {
-      color: #dc3545;
-      font-weight: bold;
+    #tabla-lecturas tbody tr:first-child {
+      background-color: rgba(13, 110, 253, 0.1);
     }
-    .soil-dry {
-      color: #dc3545; /* Rojo para suelo seco */
+    .badge {
+      font-size: 0.8rem;
     }
-    .soil-moist {
-      color: #ffc107; /* Amarillo para suelo húmedo */
+    
+    #btn-actualizar:disabled {
+      opacity: 0.6;
     }
-    .soil-wet {
-      color: #198754; /* Verde para suelo mojado */
+    
+    #tabla-lecturas tbody tr:first-child {
+      background-color: rgba(13, 110, 253, 0.1);
+      animation: fadeIn 0.5s ease-in;
+    }
+    
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
     }
   </style>
+  
 </head>
 <body class="bg-light">
-  <div class="container mt-4">
-    <h1 class="mb-4 text-center">{{ titulo }}</h1>
-    {{ contenido|safe }}
-    <a href="/" class="btn btn-secondary mt-4">Volver al Inicio</a>
-  </div>
-
-  <script>
-    // Función para confirmación antes de eliminar
-    function confirmDelete(id, tipo) {
-      Swal.fire({
-        title: 'CONFIRMACIÓN',
-        text: '¿Está seguro de eliminar este ' + tipo + '?',
-        icon: 'warning',
-        showCancelButton: true,
-        confirmButtonColor: '#3085d6',
-        cancelButtonColor: '#d33',
-        confirmButtonText: 'Sí, eliminar',
-        cancelButtonText: 'Cancelar'
-      }).then((result) => {
-        if (result.isConfirmed) {
-          window.location.href = '/eliminar_' + tipo.toLowerCase() + '/' + id;
-        }
-      });
-    }
-
-    // Función para enviar alerta por WhatsApp
-    function enviarAlerta(id) {
-      Swal.fire({
-        title: 'CONFIRMACIÓN',
-        text: '¿Está seguro que desea enviar esta alerta por WhatsApp?',
-        icon: 'question',
-        showCancelButton: true,
-        confirmButtonColor: '#3085d6',
-        cancelButtonColor: '#d33',
-        confirmButtonText: 'Sí, enviar',
-        cancelButtonText: 'Cancelar'
-      }).then((result) => {
-        if (result.isConfirmed) {
-          Swal.fire({
-            title: 'Enviando...',
-            text: 'Preparando el mensaje para WhatsApp',
-            allowOutsideClick: false,
-            didOpen: () => { Swal.showLoading(); }
-          });
-          
-          fetch('/generar_enlace_whatsapp/' + id)
-            .then(response => response.json())
-            .then(data => {
-              if (data.error) {
-                Swal.fire('Error', data.error, 'error');
-                return;
-              }
-              
-              Swal.close();
-              const newWindow = window.open(data.url, '_blank');
-              
-              if (!newWindow) {
-                Swal.fire('Error', 'No se pudo abrir WhatsApp. Por favor, permite ventanas emergentes.', 'error');
-              } else {
-                Swal.fire({
-                  title: 'Éxito',
-                  text: 'El mensaje se ha abierto en WhatsApp',
-                  icon: 'success',
-                  timer: 2000,
-                  showConfirmButton: false
-                });
-                setTimeout(() => location.reload(), 2000);
-              }
-            })
-            .catch(error => {
-              Swal.fire('Error', 'No se pudo generar el enlace de WhatsApp', 'error');
-            });
-        }
-      });
-    }
-
-    // Mostrar alertas flash
+  <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
+    <div class="container">
+      <a class="navbar-brand" href="/">Monitoreo Invernaderos</a>
+      <div class="navbar-nav">
+        <a class="nav-link" href="/invernaderos">Invernaderos</a>
+        <a class="nav-link" href="/alertas">Alertas</a>
+      </div>
+    </div>
+  </nav>
+  
+  <div class="container">
     {% with messages = get_flashed_messages() %}
       {% if messages %}
         {% for message in messages %}
-          Swal.fire({
-            title: 'Éxito',
-            text: "{{ message }}",
-            icon: 'success',
-            timer: 2000,
-            showConfirmButton: false
-          });
+        <div class="alert alert-info alert-dismissible fade show">
+          {{ message }}
+          <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
         {% endfor %}
       {% endif %}
     {% endwith %}
-  </script>
-
-  {% if titulo == "Monitoreo en Tiempo Real" %}
+    
+    {{ content|safe }}
+  </div>
+  
   <script>
+    // Variables globales
     let tempChart, humChart;
+    let lastHistorialUpdate = 0;
+    const updateInterval = 2000; // 2 segundo
+    const historialSyncInterval = 30000; // 30 segundos
+    let isUpdating = false;
 
-    // Función para determinar la clase CSS según el valor de humedad del suelo
-    function getSoilMoistureClass(value) {
-      if (value > 800) return 'soil-dry';
-      if (value > 400) return 'soil-moist';
-      return 'soil-wet';
+    // Función para determinar estado del suelo
+    function determinarEstado(humedad) {
+      if (humedad === undefined || humedad === null) return "Sin datos";
+      if (humedad < 30) return "Muy seco";
+      if (humedad < 60) return "Seco";
+      if (humedad < 80) return "Húmedo";
+      return "Muy húmedo";
     }
 
-    // Función para interpretar el estado del suelo
-    function interpretSoilMoisture(value) {
-      if (value > 800) return 'SECO';
-      if (value > 400) return 'HÚMEDO';
-      return 'MOJADO';
+    // Función para obtener clase CSS del estado
+    function getEstadoClass(estado) {
+      if (estado.includes("Muy seco")) return "text-danger";
+      if (estado.includes("Seco")) return "text-warning";
+      if (estado.includes("Húmedo")) return "text-primary";
+      return "text-success";
     }
 
-    function crearGraficas(fechas, temperaturas, humedadesSuelo) {
-      const ctxTemp = document.getElementById('tempChart').getContext('2d');
-      const ctxHum = document.getElementById('humChart').getContext('2d');
-
-      if (tempChart) tempChart.destroy();
-      if (humChart) humChart.destroy();
-
-      // Gráfica de temperatura (se mantiene igual)
-      tempChart = new Chart(ctxTemp, {
-        type: 'line',
-        data: {
-          labels: fechas,
-          datasets: [{
-            label: 'Temperatura (°C)',
-            data: temperaturas,
-            borderColor: 'rgb(255, 99, 132)',
-            backgroundColor: 'rgba(255, 99, 132, 0.1)',
-            tension: 0.1,
-            fill: true
-          }]
-        },
-        options: {
-          responsive: true,
-          scales: {
-            y: {
-              title: { display: true, text: 'Temperatura (°C)' }
-            },
-            x: {
-              title: { display: true, text: 'Hora' },
-              ticks: { maxRotation: 45, minRotation: 45 }
-            }
-          }
+    // Función para actualizar el indicador de estado
+    function actualizarEstado(conectado) {
+      const indicator = document.getElementById('status-indicator');
+      if (indicator) {
+        if (conectado) {
+          indicator.className = 'badge bg-success me-2';
+          indicator.textContent = 'Conectado';
+        } else {
+          indicator.className = 'badge bg-danger me-2';
+          indicator.textContent = 'Desconectado';
         }
-      });
-
-      // Nueva gráfica para humedad del suelo
-      humChart = new Chart(ctxHum, {
-        type: 'line',
-        data: {
-          labels: fechas,
-          datasets: [{
-            label: 'Humedad del Suelo (raw)',
-            data: humedadesSuelo,
-            borderColor: 'rgb(75, 192, 192)',
-            backgroundColor: 'rgba(75, 192, 192, 0.1)',
-            tension: 0.1,
-            fill: true
-          }]
-        },
-        options: {
-          responsive: true,
-          scales: {
-            y: {
-              min: 0,
-              max: 1023,
-              title: { display: true, text: 'Humedad Suelo (raw 0-1023)' },
-              ticks: {
-                callback: function(value) {
-                  // Mostrar el estado interpretado en los ticks
-                  if (value === 0) return '0 (MOJADO)';
-                  if (value === 400) return '400 (HÚMEDO)';
-                  if (value === 800) return '800 (SECO)';
-                  if (value === 1023) return '1023 (MUY SECO)';
-                  return value;
-                }
-              }
-            },
-            x: {
-              title: { display: true, text: 'Hora' },
-              ticks: { maxRotation: 45, minRotation: 45 }
-            }
-          },
-          plugins: {
-            tooltip: {
-              callbacks: {
-                afterLabel: function(context) {
-                  const value = context.raw;
-                  return `Estado: ${interpretSoilMoisture(value)}`;
-                }
-              }
-            }
-          }
-        }
-      });
+      }
     }
 
-    function actualizarTablaYGraficas() {
-      fetch('/api/lecturas_realtime')
-        .then(response => response.json())
-        .then(data => {
-          // Actualizar tabla
-          const tbody = document.querySelector('#tabla-realtime tbody');
-          tbody.innerHTML = '';
-          data.slice().reverse().forEach(lectura => {
-            const tr = document.createElement('tr');
-            const tempClass = lectura.temperatura > {{ MAX_TEMP }} ? 'alert-temperature' : '';
-            const soilClass = getSoilMoistureClass(lectura.humedad_suelo);
-            const soilStatus = interpretSoilMoisture(lectura.humedad_suelo);
+    // Función para actualizar la tabla
+    function actualizarTabla(datos) {
+      const tbody = document.querySelector('#tabla-lecturas tbody');
+      if (!tbody || !datos) return;
+
+      const estado = determinarEstado(datos.humedad);
+      const estadoClass = getEstadoClass(estado);
+      const tempClass = datos.temperatura > {{ ALERT_TEMP }} ? 'critical-temp' : '';
+
+      const newRow = document.createElement('tr');
+      newRow.innerHTML = `
+        <td>${datos.fecha}</td>
+        <td class="${tempClass}">${datos.temperatura}</td>
+        <td>${datos.humedad}</td>
+        <td class="${estadoClass}">${estado}</td>
+      `;
+
+      tbody.insertBefore(newRow, tbody.firstChild);
+      
+      // Mantener máximo 10 filas
+      if (tbody.children.length > 10) {
+        tbody.removeChild(tbody.lastChild);
+      }
+    }
+
+    // Función para actualizar gráficos
+    function actualizarGraficos(nuevosDatos) {
+      if (!nuevosDatos) return;
+
+      const hora = nuevosDatos.fecha.split(' ')[1];
+
+      // Actualizar gráfico de temperatura
+      if (tempChart) {
+        tempChart.data.labels.push(hora);
+        tempChart.data.datasets[0].data.push(nuevosDatos.temperatura);
+        
+        if (tempChart.data.labels.length > 20) {
+          tempChart.data.labels.shift();
+          tempChart.data.datasets[0].data.shift();
+        }
+        tempChart.update('none'); // Animación más rápida
+      }
+
+      // Actualizar gráfico de humedad
+      if (humChart) {
+        humChart.data.labels.push(hora);
+        humChart.data.datasets[0].data.push(nuevosDatos.humedad);
+        
+        if (humChart.data.labels.length > 20) {
+          humChart.data.labels.shift();
+          humChart.data.datasets[0].data.shift();
+        }
+        humChart.update('none'); // Animación más rápida
+      }
+    }
+
+    // Función para cargar datos iniciales del historial
+    async function cargarHistorialInicial() {
+        try {
+            // Obtener el ID del invernadero de la URL de manera más robusta
+            const pathParts = window.location.pathname.split('/');
+            const invernaderoId = pathParts[pathParts.length - 1];
             
-            tr.innerHTML = `
-              <td>${lectura.fecha}</td>
-              <td class="${tempClass}">${lectura.temperatura}</td>
-              <td class="${soilClass}" title="${soilStatus}">${lectura.humedad_suelo}</td>
-            `;
-            tbody.appendChild(tr);
-          });
+            const response = await fetch(`/api/lecturas_historial/${invernaderoId}`);
+            const data = await response.json();
 
-          // Preparar datos para gráficas
-          const fechas = data.map(l => l.fecha);
-          const temperaturas = data.map(l => l.temperatura);
-          const humedadesSuelo = data.map(l => l.humedad_suelo);
+            if (data && !data.error) {
+                // Actualizar gráficos con datos históricos
+                if (tempChart) {
+                    tempChart.data.labels = data.labels.map(label => label.split(' ')[1]);
+                    tempChart.data.datasets[0].data = data.temperatura;
+                    tempChart.update('none');
+                }
 
-          crearGraficas(fechas, temperaturas, humedadesSuelo);
-        })
-        .catch(err => {
-          console.error('Error al obtener lecturas en tiempo real:', err);
-        });
+                if (humChart) {
+                    humChart.data.labels = data.labels.map(label => label.split(' ')[1]);
+                    humChart.data.datasets[0].data = data.humedad;
+                    humChart.update('none');
+                }
+            }
+        } catch (error) {
+            console.error('Error al cargar historial:', error);
+            actualizarEstado(false);
+        }
     }
 
-    // Actualizar cada 5 segundos
-    actualizarTablaYGraficas();
-    setInterval(actualizarTablaYGraficas, 5000);
+    // Función principal para obtener datos en tiempo real
+    async function obtenerDatosRealtime() {
+        if (isUpdating) return;
+        isUpdating = true;
+
+        try {
+            // Obtener el ID del invernadero de la URL de manera más robusta
+            const pathParts = window.location.pathname.split('/');
+            const invernaderoId = pathParts[pathParts.length - 1];
+            
+            const response = await fetch(`/api/lecturas_realtime/${invernaderoId}`);
+            const data = await response.json();
+
+            if (data && !data.error) {
+                actualizarTabla(data);
+                actualizarGraficos(data);
+                actualizarEstado(true);
+            }
+
+            // Sincronizar con historial completo periódicamente
+            if (Date.now() - lastHistorialUpdate > historialSyncInterval) {
+                await cargarHistorialInicial();
+                lastHistorialUpdate = Date.now();
+            }
+        } catch (error) {
+            console.error('Error al obtener datos:', error);
+            actualizarEstado(false);
+        } finally {
+            isUpdating = false;
+        }
+    }
+
+    // Inicialización de la página
+    document.addEventListener('DOMContentLoaded', function() {
+        // Obtener el ID del invernadero de la URL
+        const pathParts = window.location.pathname.split('/');
+        const invernaderoId = pathParts[pathParts.length - 1];
+        
+        // Verificar que estamos en una página de detalles de invernadero
+        if (window.location.pathname.startsWith('/invernadero/') && invernaderoId) {
+            // Inicializar gráficos si existen en la página
+            const tempCtx = document.getElementById('tempChart')?.getContext('2d');
+            const humCtx = document.getElementById('humChart')?.getContext('2d');
+
+            if (tempCtx) {
+                tempChart = new Chart(tempCtx, {
+                    type: 'line',
+                    data: {
+                        labels: [],
+                        datasets: [{
+                            label: 'Temperatura (°C)',
+                            data: [],
+                            borderColor: 'rgb(255, 99, 132)',
+                            backgroundColor: 'rgba(255, 99, 132, 0.1)',
+                            tension: 0.1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        animation: {
+                            duration: 0
+                        },
+                        interaction: {
+                            intersect: false,
+                            mode: 'index'
+                        },
+                        scales: {
+                            y: {
+                                title: { display: true, text: 'Temperatura (°C)' }
+                            }
+                        }
+                    }
+                });
+            }
+
+            if (humCtx) {
+                humChart = new Chart(humCtx, {
+                    type: 'line',
+                    data: {
+                        labels: [],
+                        datasets: [{
+                            label: 'Humedad (%)',
+                            data: [],
+                            borderColor: 'rgb(54, 162, 235)',
+                            backgroundColor: 'rgba(54, 162, 235, 0.1)',
+                            tension: 0.1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        animation: {
+                            duration: 0
+                        },
+                        interaction: {
+                            intersect: false,
+                            mode: 'index'
+                        },
+                        scales: {
+                            y: {
+                                min: 0,
+                                max: 100,
+                                title: { display: true, text: 'Humedad (%)' }
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Cargar datos iniciales y configurar actualización periódica
+            cargarHistorialInicial();
+            
+            // Actualizar cada segundo
+            setInterval(obtenerDatosRealtime, updateInterval);
+            
+            // Configurar evento para actualizar manualmente
+            const btnActualizar = document.getElementById('btn-actualizar');
+            if (btnActualizar) {
+                btnActualizar.addEventListener('click', async () => {
+                    btnActualizar.disabled = true;
+                    btnActualizar.textContent = 'Actualizando...';
+                    
+                    await obtenerDatosRealtime();
+                    await cargarHistorialInicial();
+                    
+                    btnActualizar.disabled = false;
+                    btnActualizar.textContent = 'Actualizar Ahora';
+                });
+            }
+        }
+    });
+    // Función para actualizar el listado de invernaderos
+    function actualizarListadoInvernaderos() {
+      const filas = document.querySelectorAll('tr[data-invernadero-id]');
+      
+      filas.forEach(async (fila) => {
+        const invernaderoId = fila.getAttribute('data-invernadero-id');
+        try {
+          const response = await fetch(`/api/estado_invernadero/${invernaderoId}`);
+          const data = await response.json();
+          
+          if (data && !data.error) {
+            const tempCell = fila.querySelector('.temp-cell');
+            const humCell = fila.querySelector('.hum-cell');
+            const fechaCell = fila.querySelector('.fecha-cell');
+            
+            if (tempCell) {
+              tempCell.textContent = `${data.temperatura} °C`;
+              tempCell.className = data.alerta_temp ? 'temp-cell critical-temp' : 'temp-cell';
+            }
+            if (humCell) humCell.textContent = `${data.humedad} %`;
+            if (fechaCell) fechaCell.textContent = data.fecha;
+          }
+        } catch (error) {
+          console.error(`Error actualizando invernadero ${invernaderoId}:`, error);
+        }
+      });
+    }
+
+    // Inicializar actualización del listado si estamos en la página de invernaderos
+    if (window.location.pathname === '/invernaderos') {
+      setInterval(actualizarListadoInvernaderos, 5000); // Actualizar cada 5 segundos
+    }
   </script>
-  {% endif %}
 </body>
 </html>
 """
 
-def leer_arduino():
-    global SERIAL_PORT, lecturas_activas, lecturas_realtime, alerta_enviada
+# Endpoint API para recibir datos del ESP32
+@app.route('/api/lectura', methods=['POST'])
+def recibir_lectura():
+    data = request.get_json()
+    
+    if not all(k in data for k in ['invernadero_id', 'temperatura', 'humedad']):
+        return jsonify({"error": "Datos incompletos"}), 400
+    
+    invernadero_id = int(data['invernadero_id'])
+    temperatura = float(data['temperatura'])
+    humedad = int(data['humedad'])
+    fecha = datetime.now()
 
-    alerta_enviada = False
+    # Actualizar última lectura en memoria
+    global ultimas_lecturas
+    ultimas_lecturas[invernadero_id] = {
+        'fecha': fecha,
+        'temperatura': temperatura,
+        'humedad': humedad
+    }
 
-    while True:
-        try:
-            if not lecturas_activas:
-                time.sleep(1)
-                continue
-
-            if SERIAL_PORT is None or not SERIAL_PORT.is_open:
-                ports = serial.tools.list_ports.comports()
-                for port in ports:
-                    if 'Arduino' in port.description or 'USB' in port.device:
-                        try:
-                            SERIAL_PORT = serial.Serial(port.device, SERIAL_BAUDRATE, timeout=2)
-                            print(f"[CONEXIÓN] Conectado a {port.device}")
-                            time.sleep(2)
-                            break
-                        except Exception as e:
-                            print(f"[ERROR] No se pudo conectar a {port.device}: {e}")
-                time.sleep(2)
-                continue
-
-            if SERIAL_PORT.in_waiting > 0:
-                line = SERIAL_PORT.readline().decode('utf-8', errors='ignore').strip()
-                if line and "Temperatura:" in line and "Humedad Ambiental:" in line and "Humedad del Suelo (raw):" in line:
-                    try:
-                        temp = float(line.split("Temperatura:")[1].split("°C")[0].strip())
-                        humedad_raw_str = line.split("Humedad del Suelo (raw):")[1].split(",")[0].strip()
-                        humedad_suelo = int(humedad_raw_str)
-
-                        
-                        if humedad_suelo > 800:
-                            estado_suelo = "SECO"
-                        elif humedad_suelo > 400:
-                            estado_suelo = "HÚMEDO"
-                        else:
-                            estado_suelo = "MOJADO"
-
-                        
-                        lecturas_realtime.append({
-                            "fecha": datetime.now(),
-                            "temperatura": temp,
-                            "humedad_suelo": humedad_suelo,
-                            "estado_suelo": estado_suelo
-                        })
-
-                        conn = get_db_connection()
-                        cursor = conn.cursor()
-
-                        registrar_alerta = False
-                        tipo_alerta = ""
-                        descripcion_alerta = ""
-
-                        
-                        if not alerta_enviada:
-                            if temp > MAX_TEMP:
-                                tipo_alerta = "Temperatura Alta"
-                                descripcion_alerta = f"Temperatura crítica: {temp}°C, Suelo: {humedad_suelo} ({estado_suelo})"
-                                registrar_alerta = True
-                            elif humedad_suelo > 800:
-                                tipo_alerta = "Suelo Seco"
-                                descripcion_alerta = f"Suelo seco detectado: {humedad_suelo} ({estado_suelo})"
-                                registrar_alerta = True
-
-                        if registrar_alerta:
-                            
-                            cursor.execute("""
-                                INSERT INTO lecturas (id_sensor, temperatura, humedad_suelo)
-                                VALUES (%s, %s, %s)
-                            """, (1, temp, humedad_suelo))
-
-                            
-                            cursor.execute("""
-                                INSERT INTO alertas (id_sensor, tipo_alerta, descripcion)
-                                VALUES (%s, %s, %s)
-                            """, (1, tipo_alerta, descripcion_alerta))
-
-                            conn.commit()
-                            alerta_enviada = True
-                            print(f"[ALERTA] {descripcion_alerta}")
-
-                        
-                        elif alerta_enviada and temp <= MAX_TEMP and humedad_suelo <= 800:
-                            print("[INFO] Valores normalizados. Se puede registrar nueva alerta.")
-                            alerta_enviada = False
-
-                    except Exception as e:
-                        print(f"[ERROR] Procesando datos: {e}")
-                    finally:
-                        if cursor:
-                            cursor.close()
-                        if conn:
-                            conn.close()
-
-        except serial.SerialException as e:
-            print(f"[ERROR] Serial: {e}")
-            if SERIAL_PORT:
-                SERIAL_PORT.close()
-            SERIAL_PORT = None
-            time.sleep(5)
-        except Exception as e:
-            print(f"[ERROR] Inesperado: {e}")
-            time.sleep(5)
-
-
-@app.route("/")
-def index():
-    contenido = """
-    <hr>
-    <div class="row">
-      <div class="col-md-4">
-        <div class="card">
-          <div class="card-body text-center">
-            <h5 class="card-title">Sensores</h5>
-            <a href="/ver_sensores" class="btn btn-primary">Ver Sensores</a>
-          </div>
-        </div>
-      </div>
-      <div class="col-md-4">
-        <div class="card">
-          <div class="card-body text-center">
-            <h5 class="card-title">Lecturas</h5>
-            <a href="/monitoreo" class="btn btn-success">Monitoreo</a>
-          </div>
-        </div>
-      </div>
-      <div class="col-md-4">
-        <div class="card">
-          <div class="card-body text-center">
-            <h5 class="card-title">Alertas</h5>
-            <a href="/ver_alertas" class="btn btn-warning">Ver Alertas</a>
-          </div>
-        </div>
-      </div>
-    </div>
-    """
-
-    return render_template_string(
-        BASE_HTML,
-        titulo="Panel de Control",
-        contenido=contenido,
-        fechas=[],
-        temperaturas=[],
-        humedades=[]
-    )
-
-
-@app.route("/ver_sensores", methods=['GET', 'POST'])
-def ver_sensores():
-    if request.method == 'POST' and 'confirmar_sensor' in request.form:
-        conn = None
-        cursor = None
-        try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO sensores (id_sensor, ubicacion, descripcion, fecha_instalacion)
-                VALUES (%s, %s, %s, %s)
-            """, (
-                1,
-                "Invernadero Claveles",
-                "Sensor UTC",
-                datetime.now().strftime('%Y-%m-%d')
-            ))
-            conn.commit()
-            flash("Sensor registrado exitosamente")
-        except Exception as e:
-            flash(f"Error al registrar sensor: {str(e)}")
-        finally:
-            if cursor:
-                cursor.close()
-            if conn:
-                conn.close()
-
-    puertos_disponibles = []
     try:
-        puertos = serial.tools.list_ports.comports()
-        puertos_disponibles = [p.device for p in puertos if 'Arduino' in p.description or 'USB' in p.device]
-    except Exception as e:
-        print(f"Error detectando puertos: {e}")
-
-    sensores = []
-    conn = None
-    cursor = None
-    try:
-        conn = get_db_connection()
+        conn = get_db()
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM sensores")
-        sensores = cursor.fetchall()
+        
+        # Insertar lectura en la base de datos
+        cursor.execute("""
+            INSERT INTO lecturas (invernadero_id, temperatura, humedad_suelo, fecha)
+            VALUES (%s, %s, %s, %s)
+        """, (invernadero_id, temperatura, humedad, fecha))
+
+        # Registrar alerta si es necesario
+        if temperatura > ALERT_TEMP:
+            cursor.execute("""
+                INSERT INTO alertas (invernadero_id, tipo, descripcion, fecha)
+                VALUES (%s, %s, %s, %s)
+            """, (invernadero_id, "TEMP_ALTA", 
+                 f"Temperatura crítica: {temperatura}°C en {INVERNADEROS[invernadero_id]}", 
+                 fecha))
+
+        conn.commit()
+        return jsonify({"status": "success"}), 200
+
     except Exception as e:
-        flash(f"Error al obtener sensores: {str(e)}")
+        return jsonify({"error": str(e)}), 500
     finally:
-        if cursor:
-            cursor.close()
-        if conn:
+        if 'conn' in locals() and conn.is_connected():
             conn.close()
 
-    alerta_sensor = ""
-    if puertos_disponibles and not sensores:
-        alerta_sensor = f"""
-        <div class="alert alert-info alert-dismissible fade show">
-            <strong>¡Sensor detectado!</strong> Se ha encontrado un dispositivo en {puertos_disponibles[0]}. ¿Desea registrarlo?
-            <form method="POST" class="mt-2">
-                <input type="hidden" name="confirmar_sensor" value="1">
-                <button type="submit" class="btn btn-primary btn-sm">Registrar Sensor</button>
-            </form>
-        </div>
-        """
+# Modifica el endpoint de tiempo real para usar la variable global
+@app.route('/api/lecturas_realtime/<int:invernadero_id>')
+def lecturas_realtime(invernadero_id):
+    ultima_lectura = ultimas_lecturas.get(invernadero_id)
+    
+    if ultima_lectura:
+        return jsonify({
+            'fecha': ultima_lectura['fecha'].strftime('%Y-%m-%d %H:%M'),
+            'temperatura': ultima_lectura['temperatura'],
+            'humedad': ultima_lectura['humedad'],
+            'estado': estado_suelo(ultima_lectura['humedad'])
+        })
+    else:
+        return jsonify({'error': 'No hay datos disponibles'}), 404
 
-    tabla = f"""
-    <hr>
-    <div class="card">
-        <div class="card-header bg-primary text-white">
-            <h5 class="mb-0">Sensores Registrados</h5>
-        </div>
-        <div class="card-body">
-            {alerta_sensor}
-            <div class="table-responsive">
-                <table class="table table-striped">
-                    <thead>
-                        <tr>
-                            <th>ID</th>
-                            <th>Ubicación</th>
-                            <th>Descripción</th>
-                            <th>Fecha Instalación</th>
-                            <th>Acciones</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-    """
-
-    for s in sensores:
-        tabla += f"""
-            <tr>
-                <td>{s[0]}</td>
-                <td>{s[1]}</td>
-                <td>{s[2]}</td>
-                <td>{s[3]}</td>
-                <td>
-                    <button class="btn btn-danger btn-sm" onclick="confirmDelete('{s[0]}','Sensor')">
-                        Eliminar
-                    </button>
-                </td>
-            </tr>
-        """
-    tabla += """
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    </div>
-    """
-    return render_template_string(BASE_HTML, 
-                              titulo="Sensores Registrados", 
-                              contenido=tabla,
-                              fechas=[],
-                              temperaturas=[],
-                              humedades=[])
-
-
-@app.route("/monitoreo")
-def monitoreo():
-    global lecturas_activas
-    lecturas_activas = True
-
-    conn = None
-    cursor = None
-    lecturas_a_mostrar = []
-
+# Añade esta función para obtener el historial rápido
+@app.route('/api/lecturas_historial/<int:invernadero_id>')
+def lecturas_historial(invernadero_id):
     try:
-        conn = get_db_connection()
+        conn = get_db()
         cursor = conn.cursor(dictionary=True)
-
         
         cursor.execute("""
-            SELECT l.*, a.tipo_alerta, a.descripcion, s.ubicacion 
-            FROM alertas a
-            JOIN lecturas l ON a.id_sensor = l.id_sensor 
-                AND DATE_FORMAT(a.fecha, '%Y-%m-%d %H:%i:%s') = DATE_FORMAT(l.fecha, '%Y-%m-%d %H:%i:%s')
-            JOIN sensores s ON l.id_sensor = s.id_sensor
-            ORDER BY a.fecha DESC
-            LIMIT 2
-        """)
-        lecturas_a_mostrar = cursor.fetchall()
-
+            SELECT fecha, temperatura, humedad_suelo as humedad
+            FROM lecturas
+            WHERE invernadero_id = %s
+            ORDER BY fecha DESC
+            LIMIT 20
+        """, (invernadero_id,))
+        
+        lecturas = cursor.fetchall()
+        
+        # Invertir el orden para que los más recientes estén al final (para los gráficos)
+        lecturas.reverse()
+        
+        return jsonify({
+            'labels': [lectura['fecha'].strftime('%Y-%m-%d %H:%M') for lectura in lecturas],
+            'temperatura': [lectura['temperatura'] for lectura in lecturas],
+            'humedad': [lectura['humedad'] for lectura in lecturas]
+        })
+        
     except Exception as e:
-        flash(f"Error al obtener lecturas altas: {str(e)}")
+        return jsonify({'error': str(e)}), 500
     finally:
-        if cursor:
-            cursor.close()
-        if conn:
+        if 'conn' in locals() and conn.is_connected():
             conn.close()
 
-    # =================== TABLA EN TIEMPO REAL ===================
-    tabla_realtime = """
+@app.route('/api/estado_invernadero/<int:invernadero_id>')
+def estado_invernadero(invernadero_id):
+    """Obtiene el estado actual resumido de un invernadero"""
+    try:
+        conn = get_db()
+        cursor = conn.cursor(dictionary=True)
+        
+        cursor.execute("""
+            SELECT temperatura, humedad_suelo as humedad, fecha
+            FROM lecturas 
+            WHERE invernadero_id = %s
+            ORDER BY fecha DESC LIMIT 1
+        """, (invernadero_id,))
+        
+        resultado = cursor.fetchone()
+        if resultado:
+            return jsonify({
+                'temperatura': float(resultado['temperatura']),
+                'humedad': int(resultado['humedad']),
+                'fecha': resultado['fecha'].strftime('%Y-%m-%d %H:%M'),
+                'estado': estado_suelo(resultado['humedad']),
+                'alerta_temp': resultado['temperatura'] > ALERT_TEMP
+            })
+        else:
+            return jsonify({'error': 'No hay datos'}), 404
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if 'conn' in locals() and conn.is_connected():
+            conn.close()
+
+# Página principal
+@app.route('/')
+def home():
+    content = """
+    <div class="row text-center">
+      <div class="col-md-6 mb-4">
+        <div class="card dashboard-card">
+          <div class="card-body">
+            <h2 class="card-title">Invernaderos</h2>
+            <p class="card-text">Monitoreo en tiempo real de todos los invernaderos</p>
+            <a href="/invernaderos" class="btn btn-primary">Ver Invernaderos</a>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-6 mb-4">
+        <div class="card dashboard-card">
+          <div class="card-body">
+            <h2 class="card-title">Alertas</h2>
+            <p class="card-text">Registro de alertas y eventos críticos</p>
+            <a href="/alertas" class="btn btn-danger">Ver Alertas</a>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+    return render_template_string(BASE_HTML, title="Panel Principal", content=content)
+
+# Página de invernaderos
+@app.route('/invernaderos')
+def listar_invernaderos():
+    # Obtener últimos datos de cada invernadero
+    ultimos_datos = {}
+    try:
+        conn = get_db()
+        cursor = conn.cursor(dictionary=True)
+        
+        for invernadero_id in INVERNADEROS:
+            cursor.execute("""
+                SELECT temperatura, humedad_suelo as humedad, fecha
+                FROM lecturas 
+                WHERE invernadero_id = %s
+                ORDER BY fecha DESC LIMIT 1
+            """, (invernadero_id,))
+            
+            resultado = cursor.fetchone()
+            if resultado:
+                ultimos_datos[invernadero_id] = {
+                    "temperatura": float(resultado['temperatura']) if resultado['temperatura'] is not None else None,
+                    "humedad": int(resultado['humedad']) if resultado['humedad'] is not None else None,
+                    "fecha": resultado['fecha'].strftime('%Y-%m-%d %H:%M') if resultado['fecha'] else "Sin datos"
+                }
+            else:
+                ultimos_datos[invernadero_id] = {
+                    "temperatura": None,
+                    "humedad": None,
+                    "fecha": "Sin datos"
+                }
+
+    except Exception as e:
+        flash(f"Error al obtener datos: {str(e)}")
+        ultimos_datos = {id: {
+            "temperatura": None,
+            "humedad": None,
+            "fecha": "Error"
+        } for id in INVERNADEROS}
+    finally:
+        if 'conn' in locals() and conn.is_connected():
+            conn.close()
+
+    # Generar tabla
+    tabla = """
     <div class="card mb-4">
       <div class="card-header bg-primary text-white">
-        <h5 class="mb-0">Lecturas en Tiempo Real</h5>
+        <h3 class="mb-0">Listado de Invernaderos</h3>
       </div>
-      <div class="card-body table-responsive">
-        <table id="tabla-realtime" class="table table-striped">
-          <thead>
-            <tr><th>Fecha</th><th>Temperatura (°C)</th><th>Humedad Suelo (raw)</th></tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
-    </div>
-    <hr>
+      <div class="card-body">
+        <div class="table-responsive">
+          <table class="table table-hover">
+            <thead class="table-light">
+              <tr>
+                <th>Invernadero</th>
+                <th>Temperatura</th>
+                <th>Humedad</th>
+                <th>Última Lectura</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody>
     """
 
-    # =================== TABLA DE ALERTAS RECIENTES ===================
-    tabla_altas = """
-    <div class="card">
-      <div class="card-header bg-warning text-dark">
-        <h5 class="mb-0">Últimas Lecturas con Alertas</h5>
-      </div>
-      <div class="card-body table-responsive">
-        <table class="table table-striped">
-          <thead>
-            <tr><th>Fecha</th><th>Tipo</th><th>Temperatura (°C)</th><th>Humedad Suelo</th><th>Ubicación</th></tr>
-          </thead>
-          <tbody>
-    """
-
-    for la in lecturas_a_mostrar:
-        fecha_local = la['fecha'] - timedelta(hours=5)
-        soil_class = ""
-        if la['humedad_suelo'] > 800:
-            soil_class = 'soil-dry'
-        elif la['humedad_suelo'] > 400:
-            soil_class = 'soil-moist'
-        else:
-            soil_class = 'soil-wet'
-
-        tabla_altas += f"""
-          <tr>
-            <td>{fecha_local.strftime('%Y-%m-%d %H:%M:%S')}</td>
-            <td>{la.get('tipo_alerta', 'Desconocida')}</td>
-            <td class="alert-temperature">{la['temperatura']}</td>
-            <td class="{soil_class}">{la['humedad_suelo']}</td>
-            <td>{la['ubicacion']}</td>
-          </tr>
+    for id, nombre in INVERNADEROS.items():
+        datos = ultimos_datos.get(id, {})
+        temp = datos.get('temperatura')
+        temp_class = 'critical-temp' if temp is not None and temp > ALERT_TEMP else ''
+        
+        # Formatear valores para mostrar
+        temp_display = f"{temp} °C" if temp is not None else 'N/A'
+        hum_display = f"{datos.get('humedad')} %" if datos.get('humedad') is not None else 'N/A'
+        
+        tabla += f"""
+              <tr class="alert-row" data-invernadero-id="{id}">
+                <td>{nombre}</td>
+                <td class="temp-cell {temp_class}">{temp_display}</td>
+                <td class="hum-cell">{hum_display}</td>
+                <td class="fecha-cell">{datos.get('fecha', 'Sin datos')}</td>
+                <td>
+                  <a href="/invernadero/{id}" class="btn btn-sm btn-outline-primary">Ver Detalles</a>
+                </td>
+              </tr>
         """
 
-    tabla_altas += """
-          </tbody>
-        </table>
-      </div>
-    </div>
-    """
-
-    # =================== GRÁFICAS ===================
-    graficos = """
-    <div class="row mt-4">
-      <div class="col-md-6">
-        <div class="card">
-          <div class="card-header bg-info text-white">Gráfica de Temperatura</div>
-          <div class="card-body">
-            <canvas id="tempChart" width="400" height="300"></canvas>
-          </div>
-        </div>
-      </div>
-      <div class="col-md-6">
-        <div class="card">
-          <div class="card-header bg-info text-white">Gráfica de Humedad del Suelo</div>
-          <div class="card-body">
-            <canvas id="humChart" width="400" height="300"></canvas>
-          </div>
+    tabla += """
+            </tbody>
+          </table>
         </div>
       </div>
     </div>
-    <hr>
     """
-
-    contenido = tabla_realtime + graficos + tabla_altas
 
     return render_template_string(
         BASE_HTML,
-        titulo="Monitoreo en Tiempo Real",
-        contenido=contenido,
-        MAX_TEMP=MAX_TEMP,
-        fechas=[],
-        temperaturas=[],
-        humedades=[]
+        title="Invernaderos",
+        content=tabla
     )
 
-@app.route("/ver_alertas")
-def ver_alertas():
-    conn = None
-    cursor = None
-    alertas = []
-
+# Detalle de invernadero
+@app.route('/invernadero/<int:invernadero_id>')
+def detalle_invernadero(invernadero_id):
+    if invernadero_id not in INVERNADEROS:
+        flash("Invernadero no encontrado")
+        return redirect(url_for('listar_invernaderos'))
+    
+    # Obtener datos históricos iniciales
+    lecturas = []
     try:
-        conn = get_db_connection()
+        conn = get_db()
         cursor = conn.cursor(dictionary=True)
-
         
         cursor.execute("""
-            SELECT a.*, s.ubicacion 
-            FROM alertas a
-            JOIN sensores s ON a.id_sensor = s.id_sensor
-            ORDER BY a.fecha DESC
-            LIMIT 2
+            SELECT fecha, temperatura, humedad_suelo as humedad
+            FROM lecturas
+            WHERE invernadero_id = %s
+            ORDER BY fecha DESC
+            LIMIT 10
+        """, (invernadero_id,))
+        lecturas = cursor.fetchall()
+
+    except Exception as e:
+        flash(f"Error al obtener datos: {str(e)}")
+    finally:
+        if 'conn' in locals() and conn.is_connected():
+            conn.close()
+
+    # Generar tabla de lecturas recientes
+    tabla_lecturas = f"""
+    <div class="card mb-4">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <h3 class="mb-0">Lecturas Recientes - {INVERNADEROS[invernadero_id]}</h3>
+        <button id="btn-actualizar" class="btn btn-sm btn-primary">Actualizar Ahora</button>
+      </div>
+      <div class="card-body">
+        <div class="table-responsive">
+          <table id="tabla-lecturas" class="table table-hover">
+            <thead>
+              <tr>
+                <th>Fecha/Hora</th>
+                <th>Temperatura (°C)</th>
+                <th>Humedad (%)</th>
+                <th>Estado del suelo</th>
+              </tr>
+            </thead>
+            <tbody>
+    """
+
+    for lectura in lecturas:
+        temp_class = 'critical-temp' if lectura['temperatura'] > ALERT_TEMP else ''
+        estado = estado_suelo(lectura['humedad'])
+        estado_class = ''
+        
+        if "Muy seco" in estado:
+            estado_class = 'text-danger'
+        elif "Seco" in estado:
+            estado_class = 'text-warning'
+        elif "Húmedo" in estado:
+            estado_class = 'text-primary'
+        else:
+            estado_class = 'text-success'
+        
+        tabla_lecturas += f"""
+              <tr>
+                <td>{lectura['fecha'].strftime('%Y-%m-%d %H:%M')}</td>
+                <td class="{temp_class}">{lectura['temperatura']}</td>
+                <td>{lectura['humedad']}</td>
+                <td class="{estado_class}">{estado}</td>
+              </tr>
+        """
+
+    tabla_lecturas += """
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    """
+
+    # Contenido completo con gráficas separadas
+    content = f"""
+    <div class="d-flex justify-content-between align-items-center mb-4">
+      <h2>{INVERNADEROS[invernadero_id]}</h2>
+      <div>
+        <span id="status-indicator" class="badge bg-success me-2">Conectado</span>
+        <a href="/invernaderos" class="btn btn-secondary">Volver</a>
+      </div>
+    </div>
+    
+    <div class="row mb-4">
+      <div class="col-md-6">
+        <div class="card">
+          <div class="card-header">
+            <h4 class="mb-0">Temperatura</h4>
+          </div>
+          <div class="card-body">
+            <div class="chart-container">
+              <canvas id="tempChart"></canvas>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-6">
+        <div class="card">
+          <div class="card-header">
+            <h4 class="mb-0">Humedad del Suelo</h4>
+          </div>
+          <div class="card-body">
+            <div class="chart-container">
+              <canvas id="humChart"></canvas>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    {tabla_lecturas}
+    """
+
+    return render_template_string(
+        BASE_HTML,
+        title=f"Detalles - {INVERNADEROS[invernadero_id]}",
+        content=content,
+        ALERT_TEMP=ALERT_TEMP
+    )
+
+# Página de alertas
+@app.route('/alertas')
+def alertas():
+    # Obtener alertas recientes
+    alertas_db = []
+    try:
+        conn = get_db()
+        cursor = conn.cursor(dictionary=True)
+        
+        cursor.execute("""
+            SELECT invernadero_id, tipo, descripcion, fecha
+            FROM alertas
+            ORDER BY fecha DESC
+            LIMIT 50
         """)
-        alertas = cursor.fetchall()
+        alertas_db = cursor.fetchall()
 
     except Exception as e:
         flash(f"Error al obtener alertas: {str(e)}")
     finally:
-        if cursor:
-            cursor.close()
-        if conn:
+        if 'conn' in locals() and conn.is_connected():
             conn.close()
 
-    if not alertas:
-        contenido = "<div class='alert alert-info'>No hay alertas activas.</div>"
-        return render_template_string(BASE_HTML, titulo="Alertas", contenido=contenido, fechas=[], temperaturas=[], humedades=[])
-
-    tabla = f"""
-    <hr>
-    <div class="card">
-      <div class="card-header bg-warning text-dark">
-        <h5 class="mb-0">Alertas Críticas Recientes</h5>
+    # Generar tabla de alertas
+    tabla = """
+    <div class="card mb-4">
+      <div class="card-header bg-danger text-white">
+        <h3 class="mb-0">Alertas Recientes</h3>
       </div>
-      <div class="card-body table-responsive">
-        <table class="table table-striped">
-          <thead>
-            <tr><th>Fecha</th><th>Tipo</th><th>Descripción</th><th>Ubicación</th><th>Acciones</th></tr>
-          </thead>
-          <tbody>
+      <div class="card-body">
+        <div class="table-responsive">
+          <table class="table table-hover">
+            <thead>
+              <tr>
+                <th>Fecha</th>
+                <th>Invernadero</th>
+                <th>Tipo</th>
+                <th>Descripción</th>
+              </tr>
+            </thead>
+            <tbody>
     """
 
-    for alerta in alertas:
-        fecha_local = alerta['fecha'] - timedelta(hours=5)
+    for alerta in alertas_db:
+        nombre_invernadero = INVERNADEROS.get(alerta['invernadero_id'], f"Invernadero {alerta['invernadero_id']}")
         tabla += f"""
-            <tr>
-              <td>{fecha_local.strftime('%Y-%m-%d %H:%M:%S')}</td>
-              <td>{alerta['tipo_alerta']}</td>
-              <td>{alerta['descripcion']}</td>
-              <td>{alerta['ubicacion']}</td>
-              <td>
-                <button class="btn btn-success btn-sm" onclick="enviarAlerta('{alerta['id_alerta']}')">WhatsApp</button>
-              </td>
-            </tr>
+              <tr>
+                <td>{alerta['fecha'].strftime('%Y-%m-%d %H:%M')}</td>
+                <td>{nombre_invernadero}</td>
+                <td><span class="badge bg-danger">{alerta['tipo']}</span></td>
+                <td>{alerta['descripcion']}</td>
+              </tr>
         """
-
     tabla += """
-          </tbody>
-        </table>
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
     """
 
-    return render_template_string(BASE_HTML, titulo="Alertas", contenido=tabla, fechas=[], temperaturas=[], humedades=[])
+    return render_template_string(
+        BASE_HTML,
+        title="Alertas",
+        content=tabla
+    )
 
-
-@app.route("/eliminar_sensor/<int:id>")
-def eliminar_sensor(id):
-    conn = None
-    cursor = None
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM sensores WHERE id_sensor = %s", (id,))
-        conn.commit()
-        flash("Sensor eliminado correctamente")
-    except Exception as e:
-        flash(f"Error al eliminar sensor: {str(e)}")
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-    return redirect(url_for('ver_sensores'))
-
-@app.route("/eliminar_alerta/<int:id>")
-def eliminar_alerta(id):
-    conn = None
-    cursor = None
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM alertas WHERE id_alerta = %s", (id,))
-        conn.commit()
-        flash("Alerta eliminada correctamente")
-    except Exception as e:
-        flash(f"Error al eliminar alerta: {str(e)}")
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-    return redirect(url_for('ver_alertas'))
-
-
-@app.route("/generar_enlace_whatsapp/<int:id>")
-def generar_enlace_whatsapp(id):
-    conn = None
-    cursor = None
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor(dictionary=True)
-
-        
-        cursor.execute("""
-            SELECT a.*, s.ubicacion 
-            FROM alertas a 
-            JOIN sensores s ON a.id_sensor = s.id_sensor 
-            WHERE a.id_alerta = %s
-        """, (id,))
-        alerta = cursor.fetchone()
-
-        if not alerta:
-            return jsonify({"error": "No se encontró alerta con ese ID"}), 404
-
-        fecha_local = alerta['fecha'] - timedelta(hours=5)
-        mensaje = (
-            "*ALERTA DEl INVERNADERO NUMERO UNO*\n\n"
-            f"*Sensor*: {alerta['ubicacion']}\n"
-            f"*Tipo*: {alerta['tipo_alerta']} en {alerta['ubicacion']}\n"
-            f"*Descripción*: {alerta['descripcion']}\n"
-            f"*Fecha*: {fecha_local.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-            "Este es un mensaje automático del sistema de monitoreo."
-        )
-        
-        cursor.execute("DELETE FROM alertas WHERE id_alerta = %s", (id,))
-        conn.commit()
-        
-        url = f"https://wa.me/{WHATSAPP_NUMBER}?text={mensaje.replace(' ', '%20').replace(chr(10), '%0A')}"
-        return jsonify({"url": url})
-
-    except Exception as e:
-        return jsonify({"error": f"Error generando enlace WhatsApp: {e}"}), 500
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-
-
-
-@app.route("/api/lecturas_realtime")
-def api_lecturas_realtime():
-    global lecturas_realtime
-    data = [{
-        "fecha": l["fecha"].strftime('%Y-%m-%d %H:%M:%S'),
-        "temperatura": l["temperatura"],
-        "humedad_suelo": l["humedad_suelo"]
-    } for l in list(lecturas_realtime)]
-    return jsonify(data)
-
-if __name__ == "__main__":
-    
-    hilo_arduino = threading.Thread(target=leer_arduino, daemon=True)
-    hilo_arduino.start()
-
-    app.run(host="0.0.0.0", port=5000, debug=True)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)
