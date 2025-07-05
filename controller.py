@@ -1,7 +1,9 @@
 from flask import Flask, request, jsonify, render_template_string, flash, redirect, url_for
 import mysql.connector
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import deque
+import requests
+import threading
 
 app = Flask(__name__)
 app.secret_key = "tu_clave_secreta"
@@ -17,7 +19,14 @@ INVERNADEROS = {
 
 ALERT_TEMP = 40  # Umbral de temperatura para alertas
 
-ultimas_lecturas = {invernadero_id: None for invernadero_id in INVERNADEROS.keys()}
+DESTINATION_WHATSAPP = "593979111576"   # Número destino (sin "+" o "whatsapp:")
+
+# Variables globales para almacenar lecturas
+lecturas_sensor = []  # Lista para almacenar todas las lecturas del sensor
+asignacion_activa = None  # Almacena el ID del invernadero activo
+ultimas_lecturas = {invernadero_id: None for invernadero_id in INVERNADEROS.keys()} 
+ultimos_estados = {invernadero_id: None for invernadero_id in INVERNADEROS.keys()}  # Para seguimiento de estados
+
 
 def estado_suelo(humedad):
     if humedad is None:
@@ -39,6 +48,7 @@ def get_db():
         password="admin",
         database="db_invernadero"
     )
+
 
 # HTML Base
 BASE_HTML = """
@@ -428,71 +438,60 @@ BASE_HTML = """
 </html>
 """
 
-# Endpoint API para recibir datos del ESP32
 @app.route('/api/lectura', methods=['POST'])
 def recibir_lectura():
+    global lecturas_sensor
+    
     data = request.get_json()
-    
-    if not all(k in data for k in ['invernadero_id', 'temperatura', 'humedad']):
+    print("Datos recibidos del sensor:", data)
+
+    if not all(k in data for k in ['temperatura', 'humedad_suelo']):
         return jsonify({"error": "Datos incompletos"}), 400
-    
-    invernadero_id = int(data['invernadero_id'])
-    temperatura = float(data['temperatura'])
-    humedad = int(data['humedad'])
-    fecha = datetime.now()
 
-    # Actualizar última lectura en memoria
-    global ultimas_lecturas
-    ultimas_lecturas[invernadero_id] = {
-        'fecha': fecha,
-        'temperatura': temperatura,
-        'humedad': humedad
+    # Guardamos la lectura en la lista
+    nueva_lectura = {
+        'fecha': datetime.now(),
+        'temperatura': float(data['temperatura']),
+        'humedad': int(data['humedad_suelo'])
     }
+    
+    lecturas_sensor.append(nueva_lectura)
+    
+    # Si hay un invernadero activo, asignamos automáticamente
+    if asignacion_activa:
+        asignar_lectura_automatica(asignacion_activa, nueva_lectura)
+    
+    return jsonify({"status": "success"}), 200
 
+# Función para asignación automática
+def asignar_lectura_automatica(invernadero_id, lectura):
     try:
         conn = get_db()
         cursor = conn.cursor()
         
-        # Insertar lectura en la base de datos
         cursor.execute("""
             INSERT INTO lecturas (invernadero_id, temperatura, humedad_suelo, fecha)
             VALUES (%s, %s, %s, %s)
-        """, (invernadero_id, temperatura, humedad, fecha))
+        """, (invernadero_id, lectura['temperatura'], lectura['humedad'], lectura['fecha']))
 
-        # Registrar alerta si es necesario
-        if temperatura > ALERT_TEMP:
+        if lectura['temperatura'] > ALERT_TEMP:
             cursor.execute("""
                 INSERT INTO alertas (invernadero_id, tipo, descripcion, fecha)
                 VALUES (%s, %s, %s, %s)
             """, (invernadero_id, "TEMP_ALTA", 
-                 f"Temperatura crítica: {temperatura}°C en {INVERNADEROS[invernadero_id]}", 
-                 fecha))
+                 f"Temperatura crítica: {lectura['temperatura']}°C en {INVERNADEROS[invernadero_id]}", 
+                 lectura['fecha']))
 
         conn.commit()
-        return jsonify({"status": "success"}), 200
-
+        print(f"Lectura automáticamente asignada a {INVERNADEROS[invernadero_id]}")
+        
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print(f"Error al guardar lectura automática: {str(e)}")
     finally:
         if 'conn' in locals() and conn.is_connected():
             conn.close()
 
-# Modifica el endpoint de tiempo real para usar la variable global
-@app.route('/api/lecturas_realtime/<int:invernadero_id>')
-def lecturas_realtime(invernadero_id):
-    ultima_lectura = ultimas_lecturas.get(invernadero_id)
-    
-    if ultima_lectura:
-        return jsonify({
-            'fecha': ultima_lectura['fecha'].strftime('%Y-%m-%d %H:%M'),
-            'temperatura': ultima_lectura['temperatura'],
-            'humedad': ultima_lectura['humedad'],
-            'estado': estado_suelo(ultima_lectura['humedad'])
-        })
-    else:
-        return jsonify({'error': 'No hay datos disponibles'}), 404
-
-# Añade esta función para obtener el historial rápido
+# Endpoint para obtener historial de lecturas
 @app.route('/api/lecturas_historial/<int:invernadero_id>')
 def lecturas_historial(invernadero_id):
     try:
@@ -524,9 +523,9 @@ def lecturas_historial(invernadero_id):
         if 'conn' in locals() and conn.is_connected():
             conn.close()
 
+# Endpoint para obtener estado actual de un invernadero
 @app.route('/api/estado_invernadero/<int:invernadero_id>')
 def estado_invernadero(invernadero_id):
-    """Obtiene el estado actual resumido de un invernadero"""
     try:
         conn = get_db()
         cursor = conn.cursor(dictionary=True)
@@ -548,7 +547,7 @@ def estado_invernadero(invernadero_id):
                 'alerta_temp': resultado['temperatura'] > ALERT_TEMP
             })
         else:
-            return jsonify({'error': 'No hay datos'}), 404
+            return jsonify({'error': 'No hay datos para este invernadero'}), 404
             
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -583,7 +582,7 @@ def home():
     """
     return render_template_string(BASE_HTML, title="Panel Principal", content=content)
 
-# Página de invernaderos
+# Página de listado de invernaderos
 @app.route('/invernaderos')
 def listar_invernaderos():
     # Obtener últimos datos de cada invernadero
@@ -681,12 +680,18 @@ def listar_invernaderos():
         content=tabla
     )
 
-# Detalle de invernadero
+# Página de detalle de invernadero
 @app.route('/invernadero/<int:invernadero_id>')
 def detalle_invernadero(invernadero_id):
+    global asignacion_activa
+    
     if invernadero_id not in INVERNADEROS:
         flash("Invernadero no encontrado")
         return redirect(url_for('listar_invernaderos'))
+    
+    # Activamos la asignación automática para este invernadero
+    asignacion_activa = invernadero_id
+    print(f"Asignación automática activada para {INVERNADEROS[invernadero_id]}")
     
     # Obtener datos históricos iniciales
     lecturas = []
@@ -761,6 +766,17 @@ def detalle_invernadero(invernadero_id):
     </div>
     """
 
+    # Añadir script para manejar la salida de la página
+    exit_script = """
+    <script>
+    window.addEventListener('beforeunload', function() {
+        fetch('/api/desactivar_asignacion', {
+            method: 'POST'
+        });
+    });
+    </script>
+    """
+
     # Contenido completo con gráficas separadas
     content = f"""
     <div class="d-flex justify-content-between align-items-center mb-4">
@@ -799,6 +815,7 @@ def detalle_invernadero(invernadero_id):
     </div>
     
     {tabla_lecturas}
+    {exit_script}
     """
 
     return render_template_string(
@@ -807,6 +824,53 @@ def detalle_invernadero(invernadero_id):
         content=content,
         ALERT_TEMP=ALERT_TEMP
     )
+
+# Nuevo endpoint para desactivar la asignación automática
+@app.route('/api/desactivar_asignacion', methods=['POST'])
+def desactivar_asignacion():
+    global asignacion_activa
+    asignacion_activa = None
+    print("Asignación automática desactivada")
+    return jsonify({"status": "success"}), 200
+
+# Modificación en el endpoint de tiempo real para actualizar las últimas lecturas
+@app.route('/api/lecturas_realtime/<int:invernadero_id>')
+def lecturas_realtime(invernadero_id):
+    try:
+        conn = get_db()
+        cursor = conn.cursor(dictionary=True)
+        
+        cursor.execute("""
+            SELECT fecha, temperatura, humedad_suelo as humedad
+            FROM lecturas
+            WHERE invernadero_id = %s
+            ORDER BY fecha DESC
+            LIMIT 1
+        """, (invernadero_id,))
+        
+        resultado = cursor.fetchone()
+        if resultado:
+            ultimas_lecturas[invernadero_id] = {
+                'fecha': resultado['fecha'],
+                'temperatura': float(resultado['temperatura']),
+                'humedad': int(resultado['humedad'])
+            }
+            
+            return jsonify({
+                'fecha': resultado['fecha'].strftime('%Y-%m-%d %H:%M'),
+                'temperatura': float(resultado['temperatura']),
+                'humedad': int(resultado['humedad']),
+                'estado': estado_suelo(resultado['humedad'])
+            })
+        else:
+            return jsonify({'error': 'No hay datos disponibles para este invernadero'}), 404
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if 'conn' in locals() and conn.is_connected():
+            conn.close()
+
 
 # Página de alertas
 @app.route('/alertas')
@@ -874,6 +938,88 @@ def alertas():
         title="Alertas",
         content=tabla
     )
+
+def enviar_alerta_whatsapp(mensaje):
+    def enviar():
+        try:            
+            instance_id = "instance130350"
+            token = "2gy4bgmwpj4a7uy7"
+            to = DESTINATION_WHATSAPP
+            
+            mensaje_codificado = requests.utils.quote(mensaje)
+                        
+            url = f"https://api.ultramsg.com/{instance_id}/messages/chat?token={token}&to={to}&body={mensaje_codificado}"
+                        
+            response = requests.get(url)
+            
+            if response.status_code == 200:
+                print(f"Alerta enviada. Respuesta: {response.json()}")
+            else:
+                print(f"Error. Código: {response.status_code}, Respuesta: {response.text}")
+                
+        except Exception as e:
+            print(f"Error al enviar WhatsApp: {str(e)}")
+
+    thread = threading.Thread(target=enviar)
+    thread.start()
+
+def asignar_lectura_automatica(invernadero_id, lectura):
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        fecha_formateada = lectura['fecha'].strftime("%Y-%m-%d %H:%M:%S")
+        
+        cursor.execute("""
+            INSERT INTO lecturas (invernadero_id, temperatura, humedad_suelo, fecha)
+            VALUES (%s, %s, %s, %s)
+        """, (invernadero_id, lectura['temperatura'], lectura['humedad'], lectura['fecha']))
+
+        if lectura['temperatura'] > ALERT_TEMP:
+            mensaje_temp = f"""🌡️ *ALERTA DEL INVERNADERO NÚMERO {invernadero_id}*
+
+*Invernadero*: {INVERNADEROS[invernadero_id]}
+*Tipo*: Temperatura Alta
+*Descripción*: Temperatura crítica detectada: {lectura['temperatura']}°C (UMBRAL: {ALERT_TEMP}°C)
+*Fecha*: {fecha_formateada}
+
+Este es un mensaje automático del sistema de monitoreo."""
+            
+            cursor.execute("""
+                INSERT INTO alertas (invernadero_id, tipo, descripcion, fecha)
+                VALUES (%s, %s, %s, %s)
+            """, (invernadero_id, "TEMP_ALTA", mensaje_temp, lectura['fecha']))
+            enviar_alerta_whatsapp(mensaje_temp)
+
+        estado_actual = estado_suelo(lectura['humedad'])
+        estado_anterior = ultimos_estados[invernadero_id]
+        
+        if estado_actual != estado_anterior and estado_actual in ["Muy seco", "Seco"]:
+            mensaje_suelo = f"""💧 *ALERTA DEL INVERNADERO NÚMERO {invernadero_id}*
+
+*Invernadero*: {INVERNADEROS[invernadero_id]}
+*Tipo*: Suelo {estado_actual}
+*Descripción*: Humedad del suelo detectada: {lectura['humedad']}% ({estado_actual.upper()})
+*Fecha*: {fecha_formateada}
+
+Este es un mensaje automático del sistema de monitoreo."""
+            
+            cursor.execute("""
+                INSERT INTO alertas (invernadero_id, tipo, descripcion, fecha)
+                VALUES (%s, %s, %s, %s)
+            """, (invernadero_id, "SUELO_SECO", mensaje_suelo, lectura['fecha']))
+            
+            if estado_actual == "Muy seco":
+                enviar_alerta_whatsapp(mensaje_suelo)
+        
+        ultimos_estados[invernadero_id] = estado_actual
+        conn.commit()
+        
+    except Exception as e:
+        print(f"Error al guardar lectura automática: {str(e)}")
+    finally:
+        if 'conn' in locals() and conn.is_connected():
+            conn.close()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
