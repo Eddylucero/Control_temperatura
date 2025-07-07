@@ -10,14 +10,14 @@ app.secret_key = "tu_clave_secreta"
 
 # Configuración
 INVERNADEROS = {
-    1: "Invernadero de Rosas",
+    1: "Invernadero de Claveles",
     2: "Invernadero de Claveles", 
-    3: "Invernadero de Hortensias",
-    4: "Invernadero de Tulipanes",
-    5: "Invernadero de Geranios"
+    3: "Invernadero de Claveles",
+    4: "Invernadero de Claveles",
+    5: "Invernadero de Claveles"
 }
 
-ALERT_TEMP = 40  # Umbral de temperatura para alertas
+ALERT_TEMP = 25  # Umbral de temperatura para alertas
 
 DESTINATION_WHATSAPP = "593979111576"   # Número destino (sin "+" o "whatsapp:")
 
@@ -26,19 +26,17 @@ lecturas_sensor = []  # Lista para almacenar todas las lecturas del sensor
 asignacion_activa = None  # Almacena el ID del invernadero activo
 ultimas_lecturas = {invernadero_id: None for invernadero_id in INVERNADEROS.keys()} 
 ultimos_estados = {invernadero_id: None for invernadero_id in INVERNADEROS.keys()}  # Para seguimiento de estados
+ultimas_alertas_temp = {invernadero_id: False for invernadero_id in INVERNADEROS.keys()}
 
 
 def estado_suelo(humedad):
     if humedad is None:
         return "Sin datos"
-    if humedad < 30:
-        return "Muy seco"
-    elif humedad < 60:
+    if humedad < 60:  # Umbral único para "Seco"
         return "Seco"
-    elif humedad < 80:
+    else:              # Todo lo demás es "Húmedo"
         return "Húmedo"
-    else:
-        return "Muy húmedo"
+
 
 # Conexión a la base de datos
 def get_db():
@@ -148,25 +146,21 @@ BASE_HTML = """
     // Variables globales
     let tempChart, humChart;
     let lastHistorialUpdate = 0;
-    const updateInterval = 2000; // 2 segundo
+    const updateInterval = 5000; // 5 segundos
     const historialSyncInterval = 30000; // 30 segundos
     let isUpdating = false;
 
     // Función para determinar estado del suelo
     function determinarEstado(humedad) {
       if (humedad === undefined || humedad === null) return "Sin datos";
-      if (humedad < 30) return "Muy seco";
       if (humedad < 60) return "Seco";
-      if (humedad < 80) return "Húmedo";
-      return "Muy húmedo";
+      return "Húmedo";
     }
 
     // Función para obtener clase CSS del estado
     function getEstadoClass(estado) {
-      if (estado.includes("Muy seco")) return "text-danger";
       if (estado.includes("Seco")) return "text-warning";
-      if (estado.includes("Húmedo")) return "text-primary";
-      return "text-success";
+      return "text-primary";
     }
 
     // Función para actualizar el indicador de estado
@@ -463,34 +457,6 @@ def recibir_lectura():
     
     return jsonify({"status": "success"}), 200
 
-# Función para asignación automática
-def asignar_lectura_automatica(invernadero_id, lectura):
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            INSERT INTO lecturas (invernadero_id, temperatura, humedad_suelo, fecha)
-            VALUES (%s, %s, %s, %s)
-        """, (invernadero_id, lectura['temperatura'], lectura['humedad'], lectura['fecha']))
-
-        if lectura['temperatura'] > ALERT_TEMP:
-            cursor.execute("""
-                INSERT INTO alertas (invernadero_id, tipo, descripcion, fecha)
-                VALUES (%s, %s, %s, %s)
-            """, (invernadero_id, "TEMP_ALTA", 
-                 f"Temperatura crítica: {lectura['temperatura']}°C en {INVERNADEROS[invernadero_id]}", 
-                 lectura['fecha']))
-
-        conn.commit()
-        print(f"Lectura automáticamente asignada a {INVERNADEROS[invernadero_id]}")
-        
-    except Exception as e:
-        print(f"Error al guardar lectura automática: {str(e)}")
-    finally:
-        if 'conn' in locals() and conn.is_connected():
-            conn.close()
-
 # Endpoint para obtener historial de lecturas
 @app.route('/api/lecturas_historial/<int:invernadero_id>')
 def lecturas_historial(invernadero_id):
@@ -624,7 +590,7 @@ def listar_invernaderos():
         if 'conn' in locals() and conn.is_connected():
             conn.close()
 
-    # Generar tabla
+    # Generar tabla con columna de ID
     tabla = """
     <div class="card mb-4">
       <div class="card-header bg-primary text-white">
@@ -635,6 +601,7 @@ def listar_invernaderos():
           <table class="table table-hover">
             <thead class="table-light">
               <tr>
+                <th>ID</th>
                 <th>Invernadero</th>
                 <th>Temperatura</th>
                 <th>Humedad</th>
@@ -656,6 +623,7 @@ def listar_invernaderos():
         
         tabla += f"""
               <tr class="alert-row" data-invernadero-id="{id}">
+                <td>{id}</td>
                 <td>{nombre}</td>
                 <td class="temp-cell {temp_class}">{temp_display}</td>
                 <td class="hum-cell">{hum_display}</td>
@@ -689,16 +657,14 @@ def detalle_invernadero(invernadero_id):
         flash("Invernadero no encontrado")
         return redirect(url_for('listar_invernaderos'))
     
-    # Activamos la asignación automática para este invernadero
     asignacion_activa = invernadero_id
     print(f"Asignación automática activada para {INVERNADEROS[invernadero_id]}")
-    
-    # Obtener datos históricos iniciales
+
+    # Obtener datos históricos
     lecturas = []
     try:
         conn = get_db()
         cursor = conn.cursor(dictionary=True)
-        
         cursor.execute("""
             SELECT fecha, temperatura, humedad_suelo as humedad
             FROM lecturas
@@ -707,18 +673,17 @@ def detalle_invernadero(invernadero_id):
             LIMIT 10
         """, (invernadero_id,))
         lecturas = cursor.fetchall()
-
     except Exception as e:
         flash(f"Error al obtener datos: {str(e)}")
     finally:
         if 'conn' in locals() and conn.is_connected():
             conn.close()
 
-    # Generar tabla de lecturas recientes
+    # Generar tabla de lecturas
     tabla_lecturas = f"""
     <div class="card mb-4">
       <div class="card-header d-flex justify-content-between align-items-center">
-        <h3 class="mb-0">Lecturas Recientes - {INVERNADEROS[invernadero_id]}</h3>
+        <h3 class="mb-0">Lecturas Recientes - {INVERNADEROS[invernadero_id]} ({invernadero_id})</h3>
         <button id="btn-actualizar" class="btn btn-sm btn-primary">Actualizar Ahora</button>
       </div>
       <div class="card-body">
@@ -738,16 +703,7 @@ def detalle_invernadero(invernadero_id):
     for lectura in lecturas:
         temp_class = 'critical-temp' if lectura['temperatura'] > ALERT_TEMP else ''
         estado = estado_suelo(lectura['humedad'])
-        estado_class = ''
-        
-        if "Muy seco" in estado:
-            estado_class = 'text-danger'
-        elif "Seco" in estado:
-            estado_class = 'text-warning'
-        elif "Húmedo" in estado:
-            estado_class = 'text-primary'
-        else:
-            estado_class = 'text-success'
+        estado_class = 'text-warning' if estado == "Seco" else 'text-primary'
         
         tabla_lecturas += f"""
               <tr>
@@ -765,7 +721,7 @@ def detalle_invernadero(invernadero_id):
       </div>
     </div>
     """
-    
+
     exit_script = """
     <script>
     window.addEventListener('beforeunload', function() {
@@ -779,7 +735,7 @@ def detalle_invernadero(invernadero_id):
     # Contenido completo con gráficas separadas
     content = f"""
     <div class="d-flex justify-content-between align-items-center mb-4">
-      <h2>{INVERNADEROS[invernadero_id]}</h2>
+      <h2>{INVERNADEROS[invernadero_id]} ({invernadero_id})</h2>
       <div>
         <span id="status-indicator" class="badge bg-success me-2">Conectado</span>
         <a href="/invernaderos" class="btn btn-secondary">Volver</a>
@@ -963,53 +919,63 @@ def enviar_alerta_whatsapp(mensaje):
     thread.start()
 
 def asignar_lectura_automatica(invernadero_id, lectura):
+    global ultimas_alertas_temp
+    
     try:
         conn = get_db()
         cursor = conn.cursor()
         
-        fecha_formateada = lectura['fecha'].strftime("%Y-%m-%d %H:%M:%S")
-        
+        # Insertar la lectura en la base de datos
         cursor.execute("""
             INSERT INTO lecturas (invernadero_id, temperatura, humedad_suelo, fecha)
             VALUES (%s, %s, %s, %s)
         """, (invernadero_id, lectura['temperatura'], lectura['humedad'], lectura['fecha']))
 
+        # Verificar temperatura alta
         if lectura['temperatura'] > ALERT_TEMP:
-            mensaje_temp = f"""🌡️ *ALERTA DEL INVERNADERO NÚMERO {invernadero_id}*
-
+            if not ultimas_alertas_temp[invernadero_id]:
+                # Mensaje simple para la base de datos
+                mensaje_temp = f"Temperatura crítica: {lectura['temperatura']}°C en {INVERNADEROS[invernadero_id]}"
+                
+                cursor.execute("""
+                    INSERT INTO alertas (invernadero_id, tipo, descripcion, fecha)
+                    VALUES (%s, %s, %s, %s)
+                """, (invernadero_id, "TEMP_ALTA", mensaje_temp, lectura['fecha']))
+                
+                # Mensaje detallado para WhatsApp
+                mensaje_whatsapp = f"""🌡️ *ALERTA DEL INVERNADERO NÚMERO {invernadero_id}*
 *Invernadero*: {INVERNADEROS[invernadero_id]}
 *Tipo*: Temperatura Alta
-*Descripción*: Temperatura crítica detectada: {lectura['temperatura']}°C (UMBRAL: {ALERT_TEMP}°C)
-*Fecha*: {fecha_formateada}
+*Descripción*: {mensaje_temp}
+*Fecha*: {lectura['fecha'].strftime('%Y-%m-%d %H:%M:%S')}"""
+                enviar_alerta_whatsapp(mensaje_whatsapp)
+                
+                ultimas_alertas_temp[invernadero_id] = True
+        else:
+            # Temperatura bajó del umbral, resetear el estado
+            ultimas_alertas_temp[invernadero_id] = False
 
-Este es un mensaje automático del sistema de monitoreo."""
-            
-            cursor.execute("""
-                INSERT INTO alertas (invernadero_id, tipo, descripcion, fecha)
-                VALUES (%s, %s, %s, %s)
-            """, (invernadero_id, "TEMP_ALTA", mensaje_temp, lectura['fecha']))
-            enviar_alerta_whatsapp(mensaje_temp)
-
+        # Manejo de humedad del suelo (formato similar al de temperatura)
         estado_actual = estado_suelo(lectura['humedad'])
         estado_anterior = ultimos_estados[invernadero_id]
         
-        if estado_actual != estado_anterior and estado_actual in ["Muy seco", "Seco"]:
-            mensaje_suelo = f"""💧 *ALERTA DEL INVERNADERO NÚMERO {invernadero_id}*
-
-*Invernadero*: {INVERNADEROS[invernadero_id]}
-*Tipo*: Suelo {estado_actual}
-*Descripción*: Humedad del suelo detectada: {lectura['humedad']}% ({estado_actual.upper()})
-*Fecha*: {fecha_formateada}
-
-Este es un mensaje automático del sistema de monitoreo."""
+        if estado_actual != estado_anterior and estado_actual in ["Seco"]:
+            # Mensaje simple para la base de datos
+            mensaje_suelo_db = f"Suelo seco detectado: {lectura['humedad']}% en {INVERNADEROS[invernadero_id]}"
             
             cursor.execute("""
                 INSERT INTO alertas (invernadero_id, tipo, descripcion, fecha)
                 VALUES (%s, %s, %s, %s)
-            """, (invernadero_id, "SUELO_SECO", mensaje_suelo, lectura['fecha']))
+            """, (invernadero_id, "SUELO_SECO", mensaje_suelo_db, lectura['fecha']))
             
-            if estado_actual == "Muy seco":
-                enviar_alerta_whatsapp(mensaje_suelo)
+            if estado_actual == "Seco":
+                # Mensaje detallado para WhatsApp
+                mensaje_suelo_whatsapp = f"""💧 *ALERTA DEL INVERNADERO NÚMERO {invernadero_id}*
+*Invernadero*: {INVERNADEROS[invernadero_id]}
+*Tipo*: Suelo Seco
+*Descripción*: {mensaje_suelo_db}
+*Fecha*: {lectura['fecha'].strftime('%Y-%m-%d %H:%M:%S')}"""
+                enviar_alerta_whatsapp(mensaje_suelo_whatsapp)
         
         ultimos_estados[invernadero_id] = estado_actual
         conn.commit()
@@ -1019,6 +985,6 @@ Este es un mensaje automático del sistema de monitoreo."""
     finally:
         if 'conn' in locals() and conn.is_connected():
             conn.close()
-
+            
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
