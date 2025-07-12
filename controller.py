@@ -17,7 +17,7 @@ INVERNADEROS = {
     5: "Invernadero de Claveles"
 }
 
-ALERT_TEMP = 25  # Umbral de temperatura para alertas
+ALERT_TEMP =  30 # Umbral de temperatura para alertas
 
 DESTINATION_WHATSAPP = "593979111576"   # Número destino (sin "+" o "whatsapp:")
 
@@ -531,7 +531,8 @@ def home():
         cursor = conn.cursor(dictionary=True)
         
         cursor.execute("""
-            SELECT a.invernadero_id, a.tipo, a.descripcion, a.fecha, i.nombre as nombre_invernadero
+            SELECT a.invernadero_id, a.tipo, a.descripcion, a.fecha, 
+                   i.nombre as nombre_invernadero, i.encargado
             FROM alertas a
             JOIN invernaderos i ON a.invernadero_id = i.id
             ORDER BY a.fecha DESC
@@ -582,8 +583,15 @@ def home():
         alertas_html += f"""
             <div class="alert {alert_class} d-flex align-items-center mb-3">
                 <i class="bi {icon} me-3" style="font-size: 1.5rem;"></i>
-                <div>
-                    <strong>{tipo_text} detectada</strong> en {alerta['nombre_invernadero']} (ID: {alerta['invernadero_id']}) - {valor_text}{unidad}
+                <div class="w-100">
+                    <div class="d-flex justify-content-between align-items-start">
+                        <div>
+                            <strong>{tipo_text} detectada</strong> en {alerta['nombre_invernadero']} (ID: {alerta['invernadero_id']}) - {valor_text}{unidad}
+                        </div>
+                        <span class="badge bg-dark ms-2">
+                            <i class="bi bi-person-fill me-1"></i>{alerta['encargado']}
+                        </span>
+                    </div>
                     <div class="small text-muted">{tiempo_text}</div>
                 </div>
             </div>
@@ -689,7 +697,7 @@ def home():
                     </a>
                 </div>
                 <div class="col-md-3">
-                    <a href="#" class="card action-card h-100 text-decoration-none">
+                    <a href="/gestion-invernaderos" class="card action-card h-100 text-decoration-none">
                         <div class="card-body text-center">
                             <i class="bi bi-gear text-secondary mb-2" style="font-size: 2rem;"></i>
                             <h5 class="mb-1">Configuración</h5>
@@ -750,6 +758,11 @@ def home():
             transform: scale(1.02);
             box-shadow: 0 0 15px rgba(0,0,0,0.2);
         }}
+        
+        .alert .badge {{
+            font-size: 0.8rem;
+            padding: 0.35em 0.65em;
+        }}
     </style>
     """
     return render_template_string(BASE_HTML, title="Panel Principal", content=content)
@@ -757,13 +770,25 @@ def home():
 # Página de listado de invernaderos
 @app.route('/invernaderos')
 def listar_invernaderos():
-    # Obtener últimos datos de cada invernadero
-    ultimos_datos = {}
+    # Obtener todos los invernaderos de la base de datos
     try:
         conn = get_db()
         cursor = conn.cursor(dictionary=True)
         
-        for invernadero_id in INVERNADEROS:
+        # Obtener la lista de todos los invernaderos
+        cursor.execute("SELECT id, nombre FROM invernaderos ORDER BY id")
+        invernaderos_db = cursor.fetchall()
+        
+        if not invernaderos_db:
+            flash("No hay invernaderos registrados", "info")
+            return render_template_string(BASE_HTML, title="Invernaderos", content="<div class='alert alert-info'>No hay invernaderos registrados</div>")
+        
+        # Obtener últimos datos de cada invernadero
+        ultimos_datos = {}
+        for invernadero in invernaderos_db:
+            invernadero_id = invernadero['id']
+            
+            # Obtener datos del sensor
             cursor.execute("""
                 SELECT temperatura, humedad_suelo as humedad, fecha
                 FROM lecturas 
@@ -772,29 +797,40 @@ def listar_invernaderos():
             """, (invernadero_id,))
             
             resultado = cursor.fetchone()
-            if resultado:
+            
+            # Obtener información completa del invernadero
+            cursor.execute("""
+                SELECT nombre, cantidad_claveles, encargado
+                FROM invernaderos
+                WHERE id = %s
+            """, (invernadero_id,))
+            
+            info_invernadero = cursor.fetchone()
+            
+            if resultado and info_invernadero:
                 ultimos_datos[invernadero_id] = {
+                    "nombre": info_invernadero['nombre'],
                     "temperatura": float(resultado['temperatura']) if resultado['temperatura'] is not None else None,
                     "humedad": int(resultado['humedad']) if resultado['humedad'] is not None else None,
                     "fecha": resultado['fecha'].strftime('%Y-%m-%d %H:%M') if resultado['fecha'] else "Sin datos",
-                    "estado": estado_suelo(resultado['humedad']) if resultado['humedad'] is not None else "Sin datos"
+                    "estado": estado_suelo(resultado['humedad']) if resultado['humedad'] is not None else "Sin datos",
+                    "cantidad_claveles": info_invernadero['cantidad_claveles'],
+                    "encargado": info_invernadero['encargado']
                 }
             else:
                 ultimos_datos[invernadero_id] = {
+                    "nombre": invernadero['nombre'],
                     "temperatura": None,
                     "humedad": None,
                     "fecha": "Sin datos",
-                    "estado": "Sin datos"
+                    "estado": "Sin datos",
+                    "cantidad_claveles": 0,
+                    "encargado": "No asignado"
                 }
 
     except Exception as e:
-        flash(f"Error al obtener datos: {str(e)}")
-        ultimos_datos = {id: {
-            "temperatura": None,
-            "humedad": None,
-            "fecha": "Error",
-            "estado": "Error"
-        } for id in INVERNADEROS}
+        flash(f"Error al obtener datos: {str(e)}", "danger")
+        return render_template_string(BASE_HTML, title="Error", content=f"<div class='alert alert-danger'>Error al cargar los datos: {str(e)}</div>")
     finally:
         if 'conn' in locals() and conn.is_connected():
             conn.close()
@@ -808,10 +844,9 @@ def listar_invernaderos():
       </div>
       <div class="card-body">
         <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-4">
-    """.format(len(INVERNADEROS))
+    """.format(len(ultimos_datos))
 
-    for id, nombre in INVERNADEROS.items():
-        datos = ultimos_datos.get(id, {})
+    for invernadero_id, datos in ultimos_datos.items():
         temp = datos.get('temperatura')
         hum = datos.get('humedad')
         
@@ -828,18 +863,40 @@ def listar_invernaderos():
         temp_display = f"{temp} °C" if temp is not None else 'N/A'
         hum_display = f"{hum} %" if hum is not None else 'N/A'
         estado_display = datos.get('estado', 'Sin datos')
+        claveles_display = "{:,}".format(datos.get('cantidad_claveles', 0)).replace(",", ".")
+        encargado_display = datos.get('encargado', 'No asignado')
+        nombre_invernadero = datos.get('nombre', f"Invernadero {invernadero_id}")
         
         cards += f"""
-          <div class="col" data-invernadero-id="{id}">
+          <div class="col" data-invernadero-id="{invernadero_id}">
             <div class="card dashboard-card h-100 {card_border}">
               <div class="card-header bg-light">
                 <h5 class="card-title mb-0 d-flex justify-content-between">
-                  <span>Invernadero #{id}</span>
-                  <span class="badge bg-primary">ID: {id}</span>
+                  <span>{nombre_invernadero}</span>
+                  <span class="badge bg-primary">ID: {invernadero_id}</span>
                 </h5>
               </div>
               <div class="card-body">
-                <h4 class="card-title text-center mb-4">{nombre}</h4>
+                <h4 class="card-title text-center mb-4">Invernadero #{invernadero_id}</h4>
+                
+                <div class="row mb-3">
+                  <div class="col-md-6">
+                    <div class="d-flex align-items-center mb-2">
+                      <i class="bi bi-person-fill me-2 text-secondary"></i>
+                      <span class="text-muted">Encargado:</span>
+                    </div>
+                    <p class="ms-4">{encargado_display}</p>
+                  </div>
+                  <div class="col-md-6">
+                    <div class="d-flex align-items-center mb-2">
+                      <i class="bi bi-flower1 me-2 text-success"></i>
+                      <span class="text-muted">Claveles:</span>
+                    </div>
+                    <p class="ms-4">{claveles_display} plantas</p>
+                  </div>
+                </div>
+                
+                <hr>
                 
                 <div class="d-flex justify-content-between mb-3">
                   <div>
@@ -880,7 +937,7 @@ def listar_invernaderos():
                 </div>
                 
                 <div class="text-center">
-                  <a href="/invernadero/{id}" class="btn btn-outline-primary stretched-link">
+                  <a href="/invernadero/{invernadero_id}" class="btn btn-outline-primary stretched-link">
                     <i class="bi bi-speedometer2 me-2"> Monitorear</i>
                   </a>
                 </div>
@@ -913,6 +970,13 @@ def listar_invernaderos():
       }
       .progress-bar {
         border-radius: 10px;
+      }
+      .dashboard-card {
+        transition: transform 0.3s, box-shadow 0.3s;
+      }
+      .dashboard-card:hover {
+        transform: translateY(-5px);
+        box-shadow: 0 10px 20px rgba(0,0,0,0.1);
       }
     </style>
     """
@@ -1168,6 +1232,293 @@ def alertas():
         title="Alertas",
         content=tabla
     )
+
+@app.route('/gestion-invernaderos')
+def gestion_invernaderos():
+    try:
+        conn = get_db()
+        cursor = conn.cursor(dictionary=True)
+        
+        # Obtener todos los invernaderos
+        cursor.execute("SELECT * FROM invernaderos ORDER BY id")
+        invernaderos = cursor.fetchall()
+        
+    except Exception as e:
+        flash(f"Error al obtener invernaderos: {str(e)}", "danger")
+        invernaderos = []
+    finally:
+        if 'conn' in locals() and conn.is_connected():
+            conn.close()
+    
+    # Generar tabla HTML
+    tabla_html = """
+    <!-- Incluir CDN de Bootstrap JS (si no está en tu BASE_HTML) -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    
+    <div class="card shadow-sm">
+        <div class="card-header bg-white d-flex justify-content-between align-items-center">
+            <h3 class="mb-0">Gestión de Invernaderos</h3>
+            <a href="/agregar-invernadero" class="btn btn-primary">
+                <i class="bi bi-plus-circle me-2"></i>Agregar Invernadero
+            </a>
+        </div>
+        <div class="card-body">
+    """
+    
+    if not invernaderos:
+        tabla_html += """
+            <div class="alert alert-info">
+                No hay invernaderos registrados. <a href="/agregar-invernadero" class="alert-link">Agregar uno nuevo</a>
+            </div>
+        """
+    else:
+        tabla_html += """
+            <div class="table-responsive">
+                <table class="table table-hover table-striped">
+                    <thead class="table-light">
+                        <tr>
+                            <th>ID</th>
+                            <th>Nombre</th>
+                            <th>Cantidad de Claveles</th>
+                            <th>Encargado</th>
+                            <th>Acciones</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        """
+        
+        for inv in invernaderos:
+            tabla_html += f"""
+                        <tr>
+                            <td>{inv['id']}</td>
+                            <td>{inv['nombre']}</td>
+                            <td>{inv['cantidad_claveles']:,}</td>
+                            <td>{inv['encargado']}</td>
+                            <td>
+                                <div class="d-flex gap-2">
+                                    <a href="/editar-invernadero/{inv['id']}" class="btn btn-sm btn-outline-primary">
+                                        <i class="bi bi-pencil-square"></i>
+                                    </a>
+                                    <button class="btn btn-sm btn-outline-danger" 
+                                            onclick="confirmarEliminacion({inv['id']})">
+                                        <i class="bi bi-trash"></i>
+                                    </button>
+                                </div>
+                            </td>
+                        </tr>
+            """
+        
+        tabla_html += """
+                    </tbody>
+                </table>
+            </div>
+        """
+    
+    tabla_html += """
+        </div>
+    </div>
+
+    <!-- Modal de confirmación -->
+    <div class="modal fade" id="confirmModal" tabindex="-1" aria-labelledby="confirmModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="confirmModalLabel">Confirmar Eliminación</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    ¿Estás seguro que deseas eliminar este invernadero? Esta acción no se puede deshacer.
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+                    <a id="deleteBtn" href="#" class="btn btn-danger">Eliminar</a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function confirmarEliminacion(id) {
+            document.getElementById('deleteBtn').href = '/eliminar-invernadero/' + id;
+            var modal = new bootstrap.Modal(document.getElementById('confirmModal'));
+            modal.show();
+        }
+    </script>
+    """
+    
+    return render_template_string(
+        BASE_HTML,
+        title="Gestión de Invernaderos",
+        content=tabla_html
+    )
+
+@app.route('/agregar-invernadero', methods=['GET', 'POST'])
+def agregar_invernadero():
+    if request.method == 'POST':
+        try:
+            id = request.form['id']
+            nombre = request.form['nombre']
+            cantidad_claveles = request.form['cantidad_claveles']
+            encargado = request.form['encargado']
+            
+            conn = get_db()
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                INSERT INTO invernaderos (id, nombre, cantidad_claveles, encargado)
+                VALUES (%s, %s, %s, %s)
+            """, (id, nombre, cantidad_claveles, encargado))
+            
+            conn.commit()
+            flash("Invernadero agregado correctamente", "success")
+            return redirect('/gestion-invernaderos')
+            
+        except Exception as e:
+            flash(f"Error al agregar invernadero: {str(e)}", "danger")
+        finally:
+            if 'conn' in locals() and conn.is_connected():
+                conn.close()
+    
+    # Generar formulario HTML
+    form_html = """
+    <div class="card shadow-sm">
+        <div class="card-header bg-white">
+            <h3 class="mb-0">Agregar Nuevo Invernadero</h3>
+        </div>
+        <div class="card-body">
+            <form method="POST">
+                <div class="mb-3">
+                    <label for="id" class="form-label">ID del Invernadero</label>
+                    <input type="number" class="form-control" id="id" name="id" required>
+                </div>
+                <div class="mb-3">
+                    <label for="nombre" class="form-label">Nombre</label>
+                    <input type="text" class="form-control" id="nombre" name="nombre" required>
+                </div>
+                <div class="mb-3">
+                    <label for="cantidad_claveles" class="form-label">Cantidad de Claveles</label>
+                    <input type="number" class="form-control" id="cantidad_claveles" name="cantidad_claveles" required>
+                </div>
+                <div class="mb-3">
+                    <label for="encargado" class="form-label">Encargado</label>
+                    <input type="text" class="form-control" id="encargado" name="encargado" required>
+                </div>
+                <div class="d-flex justify-content-end gap-2">
+                    <a href="/gestion-invernaderos" class="btn btn-secondary">Cancelar</a>
+                    <button type="submit" class="btn btn-primary">Guardar</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    """
+    
+    return render_template_string(BASE_HTML, title="Agregar Invernadero", content=form_html)
+
+@app.route('/editar-invernadero/<int:id>', methods=['GET', 'POST'])
+def editar_invernadero(id):
+    if request.method == 'POST':
+        try:
+            nombre = request.form['nombre']
+            cantidad_claveles = request.form['cantidad_claveles']
+            encargado = request.form['encargado']
+            
+            conn = get_db()
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                UPDATE invernaderos 
+                SET nombre = %s, cantidad_claveles = %s, encargado = %s
+                WHERE id = %s
+            """, (nombre, cantidad_claveles, encargado, id))
+            
+            conn.commit()
+            flash("Invernadero actualizado correctamente", "success")
+            return redirect('/gestion-invernaderos')
+            
+        except Exception as e:
+            flash(f"Error al actualizar invernadero: {str(e)}", "danger")
+        finally:
+            if 'conn' in locals() and conn.is_connected():
+                conn.close()
+    
+    # Obtener datos del invernadero
+    try:
+        conn = get_db()
+        cursor = conn.cursor(dictionary=True)
+        
+        cursor.execute("SELECT * FROM invernaderos WHERE id = %s", (id,))
+        invernadero = cursor.fetchone()
+        
+        if not invernadero:
+            flash("Invernadero no encontrado", "danger")
+            return redirect('/gestion-invernaderos')
+            
+    except Exception as e:
+        flash(f"Error al obtener datos del invernadero: {str(e)}", "danger")
+        return redirect('/gestion-invernaderos')
+    finally:
+        if 'conn' in locals() and conn.is_connected():
+            conn.close()
+    
+    # Generar formulario HTML
+    form_html = f"""
+    <div class="card shadow-sm">
+        <div class="card-header bg-white">
+            <h3 class="mb-0">Editar Invernadero #{invernadero['id']}</h3>
+        </div>
+        <div class="card-body">
+            <form method="POST">
+                <div class="mb-3">
+                    <label for="nombre" class="form-label">Nombre</label>
+                    <input type="text" class="form-control" id="nombre" name="nombre" 
+                           value="{invernadero['nombre']}" required>
+                </div>
+                <div class="mb-3">
+                    <label for="cantidad_claveles" class="form-label">Cantidad de Claveles</label>
+                    <input type="number" class="form-control" id="cantidad_claveles" name="cantidad_claveles" 
+                           value="{invernadero['cantidad_claveles']}" required>
+                </div>
+                <div class="mb-3">
+                    <label for="encargado" class="form-label">Encargado</label>
+                    <input type="text" class="form-control" id="encargado" name="encargado" 
+                           value="{invernadero['encargado']}" required>
+                </div>
+                <div class="d-flex justify-content-end gap-2">
+                    <a href="/gestion-invernaderos" class="btn btn-secondary">Cancelar</a>
+                    <button type="submit" class="btn btn-primary">Guardar Cambios</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    """
+    
+    return render_template_string(BASE_HTML, title=f"Editar Invernadero #{id}", content=form_html)
+
+@app.route('/eliminar-invernadero/<int:id>')
+def eliminar_invernadero(id):
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # Verificar si el invernadero existe
+        cursor.execute("SELECT id FROM invernaderos WHERE id = %s", (id,))
+        if not cursor.fetchone():
+            flash("Invernadero no encontrado", "danger")
+            return redirect('/gestion-invernaderos')
+        
+        # Eliminar el invernadero
+        cursor.execute("DELETE FROM invernaderos WHERE id = %s", (id,))
+        conn.commit()
+        
+        flash("Invernadero eliminado correctamente", "success")
+        
+    except Exception as e:
+        flash(f"Error al eliminar invernadero: {str(e)}", "danger")
+    finally:
+        if 'conn' in locals() and conn.is_connected():
+            conn.close()
+    
+    return redirect('/gestion-invernaderos')
 
 def enviar_alerta_whatsapp(mensaje):
     def enviar():
