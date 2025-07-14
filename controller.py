@@ -1,5 +1,5 @@
 import json
-from flask import Flask, request, jsonify, render_template_string, flash, redirect, url_for
+from flask import Flask, request, jsonify, render_template_string, flash, redirect, url_for, session
 import mysql.connector
 from datetime import datetime, timedelta
 from collections import deque
@@ -7,28 +7,28 @@ import requests
 import threading
 from decimal import Decimal
 
+# --- Configuración y Variables Globales ---
 app = Flask(__name__)
-app.secret_key = "tu_clave_secreta"
+app.secret_key = "tu_clave_secreta_muy_segura" # ¡Cambia esto por una clave secreta fuerte en producción!
 
-# Configuración inicial (estos valores serán actualizados por actualizar_invernaderos())
-# Se mantiene la estructura para que las variables globales puedan ser inicializadas,
-# pero su contenido real vendrá de la base de datos.
-INVERNADEROS = {} # Se inicializa vacío, se llenará desde la DB
-
-ALERT_TEMP =  30 # Umbral de temperatura para alertas
-
+INVERNADEROS = {} 
+ALERT_TEMP = 25 
 DESTINATION_WHATSAPP = "593979111576"
+
+
+USUARIOS = {
+    "admin": "12345",
+    "usuario": "pass456"
+}
 
 def estado_suelo(humedad):
     if humedad is None:
         return "Sin datos"
-    if humedad < 60:  # Umbral único para "Seco"
+    if humedad < 60:
         return "Seco"
-    else:              # Todo lo demás es "Húmedo"
+    else:
         return "Húmedo"
 
-
-# Conexión a la base de datos
 def get_db():
     return mysql.connector.connect(
         host="localhost",
@@ -38,11 +38,6 @@ def get_db():
     )
 
 def actualizar_invernaderos():
-    """
-    Actualiza el diccionario global INVERNADEROS y las variables de estado
-    (ultimas_lecturas, ultimos_estados, ultimas_alertas_temp)
-    con los datos más recientes de la base de datos.
-    """
     global INVERNADEROS, ultimas_lecturas, ultimos_estados, ultimas_alertas_temp
     try:
         conn = get_db()
@@ -51,33 +46,27 @@ def actualizar_invernaderos():
         cursor.execute("SELECT id, nombre FROM invernaderos ORDER BY id")
         invernaderos_db = cursor.fetchall()
         
-        # Crear un nuevo diccionario de invernaderos
         nuevos_invernaderos = {row['id']: row['nombre'] for row in invernaderos_db}
         
-        # Identificar IDs actuales y nuevos
         nuevos_ids = set(nuevos_invernaderos.keys())
         ids_actuales = set(INVERNADEROS.keys())
         
-        # Agregar nuevos invernaderos a las variables de estado si no existen
         for id_nuevo in nuevos_ids - ids_actuales:
             ultimas_lecturas[id_nuevo] = None
             ultimos_estados[id_nuevo] = None
             ultimas_alertas_temp[id_nuevo] = False
         
-        # Eliminar invernaderos removidos de las variables de estado
         for id_eliminar in ids_actuales - nuevos_ids:
             ultimas_lecturas.pop(id_eliminar, None)
             ultimos_estados.pop(id_eliminar, None)
             ultimas_alertas_temp.pop(id_eliminar, None)
         
-        # Actualizar el diccionario global INVERNADEROS
         INVERNADEROS = nuevos_invernaderos
         
         print(f"INVERNADEROS actualizados: {INVERNADEROS}")
         
     except Exception as e:
         print(f"Error al actualizar INVERNADEROS desde la DB: {str(e)}")
-        # Si hay un error, se mantiene el estado anterior o un estado vacío
         INVERNADEROS = {} 
         ultimas_lecturas = {}
         ultimos_estados = {}
@@ -86,20 +75,14 @@ def actualizar_invernaderos():
         if 'conn' in locals() and conn.is_connected():
             conn.close()
 
-
-# Variables globales para almacenar lecturas
-lecturas_sensor = []  # Lista para almacenar todas las lecturas del sensor
-asignacion_activa = None  # Almacena el ID del invernadero activo
-# Inicializar estas variables como diccionarios vacíos, serán poblados por actualizar_invernaderos()
+lecturas_sensor = []  
+asignacion_activa = None  
 ultimas_lecturas = {} 
 ultimos_estados = {}  
 ultimas_alertas_temp = {} 
 
-# Llama a esta función al inicio de la aplicación para cargar los invernaderos desde la base de datos
 actualizar_invernaderos()
 
-
-# HTML Base
 BASE_HTML = """
 <!doctype html>
 <html>
@@ -328,6 +311,7 @@ BASE_HTML = """
     {{ content|safe }}
   </div>
   
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
   <script>
     // Variables globales
     let tempChart, humChart;
@@ -628,7 +612,6 @@ def recibir_lectura():
     if not all(k in data for k in ['temperatura', 'humedad_suelo']):
         return jsonify({"error": "Datos incompletos"}), 400
 
-    # Guardamos la lectura en la lista
     nueva_lectura = {
         'fecha': datetime.now(),
         'temperatura': float(data['temperatura']),
@@ -637,13 +620,11 @@ def recibir_lectura():
     
     lecturas_sensor.append(nueva_lectura)
     
-    # Si hay un invernadero activo, asignamos automáticamente
     if asignacion_activa:
         asignar_lectura_automatica(asignacion_activa, nueva_lectura)
     
     return jsonify({"status": "success"}), 200
 
-# Endpoint para obtener historial de lecturas
 @app.route('/api/lecturas_historial/<int:invernadero_id>')
 def lecturas_historial(invernadero_id):
     try:
@@ -660,7 +641,6 @@ def lecturas_historial(invernadero_id):
         
         lecturas = cursor.fetchall()
         
-        # Invertir el orden para que los más recientes estén al final (para los gráficos)
         lecturas.reverse()
         
         return jsonify({
@@ -675,7 +655,6 @@ def lecturas_historial(invernadero_id):
         if 'conn' in locals() and conn.is_connected():
             conn.close()
 
-# Endpoint para obtener estado actual de un invernadero
 @app.route('/api/estado_invernadero/<int:invernadero_id>')
 def estado_invernadero(invernadero_id):
     try:
@@ -707,11 +686,8 @@ def estado_invernadero(invernadero_id):
         if 'conn' in locals() and conn.is_connected():
             conn.close()
 
-
-# Página principal
 @app.route('/')
 def home():
-    # Obtener alertas recientes desde la base de datos
     alertas_db = []
     try:
         conn = get_db()
@@ -733,10 +709,8 @@ def home():
         if 'conn' in locals() and conn.is_connected():
             conn.close()
 
-    # Generar HTML para las alertas
     alertas_html = ""
     for alerta in alertas_db:
-        # Determinar clase CSS según el tipo de alerta
         if "TEMP" in alerta['tipo']:
             alert_class = "alert-warning"
             icon = "bi-thermometer-high"
@@ -748,7 +722,6 @@ def home():
             tipo_text = "Suelo seco"
             unidad = "%"
         
-        # Calcular tiempo transcurrido
         fecha_alerta = alerta['fecha']
         tiempo_transcurrido = datetime.now() - fecha_alerta
         minutos = int(tiempo_transcurrido.total_seconds() / 60)
@@ -762,7 +735,6 @@ def home():
         else:
             tiempo_text = f"Hace {minutos} minuto{'s' if minutos > 1 else ''}"
         
-        # Extraer valor numérico de la descripción
         import re
         valor = re.search(r"(\d+\.?\d*)", alerta['descripcion'])
         valor_text = valor.group(1) if valor else "N/A"
@@ -784,7 +756,6 @@ def home():
             </div>
         """
 
-    # Contenido completo de la página
     content = f"""
     <!-- Hero Section -->
     <div class="hero-section bg-primary text-white py-5 mb-5 rounded-3" style="
@@ -805,8 +776,34 @@ def home():
                         </a>
                     </div>
                 </div>
+
+                <!-- Carrusel en lugar de imagen estática -->
                 <div class="col-lg-5 d-none d-lg-block">
-                    <img src="static/img/image-1.png" alt="Invernadero" class="img-fluid" style="max-height: 250px;">
+                    <div id="carouselInvernaderos" class="carousel slide" data-bs-ride="carousel">
+                        <div class="carousel-inner rounded shadow">
+                            <div class="carousel-item active">
+                                <img src="static/img/image-1.png" class="d-block w-100" alt="Imagen 1" style="max-height: 250px; object-fit: cover;">
+                            </div>
+                            <div class="carousel-item">
+                                <img src="static/img/home.png" class="d-block w-100" alt="Imagen 2" style="max-height: 250px; object-fit: cover;">
+                            </div>
+                            <div class="carousel-item">
+                                <img src="static/img/image.png" class="d-block w-100" alt="Imagen 3" style="max-height: 250px; object-fit: cover;">
+                            </div>
+                            <div class="carousel-item">
+                                <img src="static/img/image-2.png" class="d-block w-100" alt="Imagen 4" style="max-height: 250px; object-fit: cover;">
+                            </div>
+                        </div>
+                        <!-- Controles opcionales -->
+                        <button class="carousel-control-prev" type="button" data-bs-target="#carouselInvernaderos" data-bs-slide="prev">
+                            <span class="carousel-control-prev-icon" aria-hidden="true"></span>
+                            <span class="visually-hidden">Anterior</span>
+                        </button>
+                        <button class="carousel-control-next" type="button" data-bs-target="#carouselInvernaderos" data-bs-slide="next">
+                            <span class="carousel-control-next-icon" aria-hidden="true"></span>
+                            <span class="visually-hidden">Siguiente</span>
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -884,7 +881,7 @@ def home():
                     </a>
                 </div>
                 <div class="col-md-3">
-                    <a href="/gestion-invernaderos" class="card action-card h-100 text-decoration-none">
+                    <a href="/login" class="card action-card h-100 text-decoration-none">
                         <div class="card-body text-center">
                             <i class="bi bi-gear text-secondary mb-2" style="font-size: 2rem;"></i>
                             <h5 class="mb-1">Configuración</h5>
@@ -954,24 +951,19 @@ def home():
     """
     return render_template_string(BASE_HTML, title="Panel Principal", content=content)
 
-# Página de listado de invernaderos
 @app.route('/invernaderos')
 def listar_invernaderos():
-    # Función para generar color único basado en ID
     def get_color_from_id(invernadero_id):
-        # Lista de colores Bootstrap que combinan bien
         colors = [
             'primary', 'secondary', 'success', 'danger', 'warning', 'info',
             'dark', 'primary', 'secondary', 'success', 'danger', 'warning'
         ]
         return colors[invernadero_id % len(colors)]
 
-    # Obtener todos los invernaderos de la base de datos
     try:
         conn = get_db()
         cursor = conn.cursor(dictionary=True)
         
-        # Obtener la lista de todos los invernaderos con sus datos completos
         cursor.execute("""
             SELECT i.id, i.nombre, i.cantidad_claveles, i.encargado,
                    (SELECT temperatura FROM lecturas WHERE invernadero_id = i.id ORDER BY fecha DESC LIMIT 1) as temperatura,
@@ -987,7 +979,6 @@ def listar_invernaderos():
             flash("No hay invernaderos registrados", "info")
             return render_template_string(BASE_HTML, title="Invernaderos", content="<div class='alert alert-info'>No hay invernaderos registrados</div>")
         
-        # Procesar los datos de cada invernadero
         ultimos_datos = {}
         for invernadero in invernaderos_db:
             invernadero_id = invernadero['id']
@@ -1009,7 +1000,6 @@ def listar_invernaderos():
         if 'conn' in locals() and conn.is_connected():
             conn.close()
 
-    # Generar tarjetas para cada invernadero
     cards = """
     <div class="card mb-4">
       <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
@@ -1025,16 +1015,13 @@ def listar_invernaderos():
         temp = datos.get('temperatura')
         hum = datos.get('humedad')
         
-        # Determinar clases CSS según los valores
         temp_class = 'text-danger' if temp is not None and temp > ALERT_TEMP else 'text-dark'
         hum_class = 'text-warning' if datos.get('estado') == "Seco" else 'text-success'
         card_border = 'border-danger' if temp is not None and temp > ALERT_TEMP else ''
         
-        # Iconos según estado
         temp_icon = 'bi-thermometer-high' if temp is not None and temp > ALERT_TEMP else 'bi-thermometer-half'
         hum_icon = 'bi-droplet' if datos.get('estado') == "Húmedo" else 'bi-droplet-fill'
         
-        # Formatear valores para mostrar
         temp_display = f"{temp} °C" if temp is not None else 'N/A'
         hum_display = f"{hum} %" if hum is not None else 'N/A'
         estado_display = datos.get('estado', 'Sin datos')
@@ -1162,12 +1149,10 @@ def listar_invernaderos():
         content=cards
     )
 
-
 @app.route('/invernadero/<int:invernadero_id>')
 def detalle_invernadero(invernadero_id):
     global asignacion_activa
     
-    # Verificar si el invernadero existe en el diccionario global (actualizado)
     if invernadero_id not in INVERNADEROS:
         flash("Invernadero no encontrado")
         return redirect(url_for('listar_invernaderos'))
@@ -1175,7 +1160,6 @@ def detalle_invernadero(invernadero_id):
     asignacion_activa = invernadero_id
     print(f"Asignación automática activada para {INVERNADEROS[invernadero_id]}")
 
-    # Obtener datos históricos
     lecturas = []
     try:
         conn = get_db()
@@ -1194,7 +1178,6 @@ def detalle_invernadero(invernadero_id):
         if 'conn' in locals() and conn.is_connected():
             conn.close()
 
-    # Generar tabla de lecturas
     tabla_lecturas = f"""
     <div class="card mb-4">
       <div class="card-header d-flex justify-content-between align-items-center">
@@ -1247,7 +1230,6 @@ def detalle_invernadero(invernadero_id):
     </script>
     """
 
-    # Contenido completo con gráficas separadas
     content = f"""
     <div class="d-flex justify-content-between align-items-center mb-4">
       <h2>{INVERNADEROS.get(invernadero_id, f"Invernadero {invernadero_id}")} ({invernadero_id})</h2>
@@ -1295,7 +1277,6 @@ def detalle_invernadero(invernadero_id):
         ALERT_TEMP=ALERT_TEMP
     )
 
-# Nuevo endpoint para desactivar la asignación automática
 @app.route('/api/desactivar_asignacion', methods=['POST'])
 def desactivar_asignacion():
     global asignacion_activa
@@ -1303,7 +1284,6 @@ def desactivar_asignacion():
     print("Asignación automática desactivada")
     return jsonify({"status": "success"}), 200
 
-# Modificación en el endpoint de tiempo real para actualizar las últimas lecturas
 @app.route('/api/lecturas_realtime/<int:invernadero_id>')
 def lecturas_realtime(invernadero_id):
     try:
@@ -1341,11 +1321,8 @@ def lecturas_realtime(invernadero_id):
         if 'conn' in locals() and conn.is_connected():
             conn.close()
 
-
-# Página de alertas
 @app.route('/alertas')
 def alertas():
-    # Obtener alertas recientes
     alertas_db = []
     try:
         conn = get_db()
@@ -1365,7 +1342,6 @@ def alertas():
         if 'conn' in locals() and conn.is_connected():
             conn.close()
 
-    # Generar tabla de alertas
     tabla = """
     <div class="card mb-4">
       <div class="card-header bg-danger text-white">
@@ -1386,7 +1362,6 @@ def alertas():
     """
 
     for alerta in alertas_db:
-        # Usar INVERNADEROS.get() para obtener el nombre, con un fallback
         nombre_invernadero = INVERNADEROS.get(alerta['invernadero_id'], f"Invernadero {alerta['invernadero_id']}")
         tabla += f"""
               <tr>
@@ -1410,13 +1385,97 @@ def alertas():
         content=tabla
     )
 
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+
+        if username in USUARIOS and USUARIOS[username] == password:
+            session['logged_in'] = True
+            flash('Inicio de sesión exitoso', 'success')
+            return redirect(url_for('gestion_invernaderos'))
+        else:
+            flash('Credenciales inválidas. Inténtalo de nuevo.', 'danger')
+    
+    content = """
+    <div class="container-fluid px-4">
+        <div class="row justify-content-center mt-5">
+            <div class="col-md-5">
+                <div class="card shadow-lg border-0 rounded-lg mt-5">
+                    <div class="card-header bg-success text-white text-center py-4">
+                        <h3 class="fw-light my-0">
+                            Bienvenido Admin
+                        </h3>
+                    </div>
+                    <div class="card-body p-4">
+                        <div class="text-center mb-4">
+                            <img src="static/img/icon-log.png" alt="Invernadero" class="img-fluid border rounded" style="max-height: 250px;">
+                        </div>
+
+                        <form method="POST">
+                            <div class="form-floating mb-3">
+                                <input class="form-control" id="inputUsername" type="text" name="username" placeholder="Usuario" required />
+                                <label for="inputUsername">Usuario</label>
+                            </div>
+                            <div class="form-floating mb-3">
+                                <input class="form-control" id="inputPassword" type="password" name="password" placeholder="Contraseña" required />
+                                <label for="inputPassword">Contraseña</label>
+                            </div>
+                            <div class="d-flex align-items-center justify-content-between mt-4 mb-0">
+                                <button type="submit" class="btn btn-primary btn-lg w-100">
+                                    <i class="bi bi-box-arrow-in-right me-2"></i>Iniciar Sesión
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                    <div class="card-footer text-center py-3">
+                        <div class="small">
+                            <a href="/">Volver a la página principal</a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <style>
+        .card-header {
+            border-bottom: 0;
+            border-top-left-radius: 0.75rem;
+            border-top-right-radius: 0.75rem;
+        }
+        .form-floating > label {
+            padding: 1rem 1.25rem;
+        }
+        .form-control {
+            padding: 1rem 1.25rem;
+            border-radius: 0.5rem;
+        }
+        img.img-fluid.border.rounded {
+            border: 2px solid #dee2e6;
+            border-radius: 1rem;
+        }
+    </style>
+    """
+    return render_template_string(BASE_HTML, title="Iniciar Sesión", content=content)
+
+@app.route('/logout')
+def logout():
+    session.pop('logged_in', None)
+    flash('Has cerrado sesión correctamente.', 'info')
+    return redirect(url_for('home'))
+
 @app.route('/gestion-invernaderos')
 def gestion_invernaderos():
+    if not session.get('logged_in'):
+        flash('Debes iniciar sesión para acceder a esta página.', 'warning')
+        return redirect(url_for('login'))
+
     try:
         conn = get_db()
         cursor = conn.cursor(dictionary=True)
         
-        # Obtener todos los invernaderos
         cursor.execute("SELECT * FROM invernaderos ORDER BY id")
         invernaderos = cursor.fetchall()
         
@@ -1427,9 +1486,7 @@ def gestion_invernaderos():
         if 'conn' in locals() and conn.is_connected():
             conn.close()
     
-    # Generar tabla HTML
     tabla_html = """
-    <!-- Incluir CDN de Bootstrap Icons -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     
@@ -1551,7 +1608,6 @@ def gestion_invernaderos():
     </div>
 
     <script>
-        // Inicializar tooltips
         document.addEventListener('DOMContentLoaded', function() {
             const tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'))
             const tooltipList = tooltipTriggerList.map(function (tooltipTriggerEl) {
@@ -1600,6 +1656,10 @@ def gestion_invernaderos():
 
 @app.route('/agregar-invernadero', methods=['GET', 'POST'])
 def agregar_invernadero():
+    if not session.get('logged_in'):
+        flash('Debes iniciar sesión para acceder a esta página.', 'warning')
+        return redirect(url_for('login'))
+
     if request.method == 'POST':
         try:
             nombre = request.form['nombre']
@@ -1609,14 +1669,13 @@ def agregar_invernadero():
             conn = get_db()
             cursor = conn.cursor()
             
-            # Consulta modificada (sin incluir el ID)
             cursor.execute("""
                 INSERT INTO invernaderos (nombre, cantidad_claveles, encargado)
                 VALUES (%s, %s, %s)
             """, (nombre, cantidad_claveles, encargado))
             
             conn.commit()
-            actualizar_invernaderos() # ¡ACTUALIZAR INVERNADEROS DESPUÉS DE LA INSERCIÓN!
+            actualizar_invernaderos()
             flash("Invernadero agregado correctamente", "success")
             return redirect('/gestion-invernaderos')
             
@@ -1626,7 +1685,6 @@ def agregar_invernadero():
             if 'conn' in locals() and conn.is_connected():
                 conn.close()
     
-    # Generar formulario HTML
     form_html = """
     <div class="container-fluid px-4">
         <div class="d-flex justify-content-between align-items-center mb-4">
@@ -1698,6 +1756,10 @@ def agregar_invernadero():
 
 @app.route('/editar-invernadero/<int:id>', methods=['GET', 'POST'])
 def editar_invernadero(id):
+    if not session.get('logged_in'):
+        flash('Debes iniciar sesión para acceder a esta página.', 'warning')
+        return redirect(url_for('login'))
+
     if request.method == 'POST':
         try:
             nombre = request.form['nombre']
@@ -1714,7 +1776,7 @@ def editar_invernadero(id):
             """, (nombre, cantidad_claveles, encargado, id))
             
             conn.commit()
-            actualizar_invernaderos() # ¡ACTUALIZAR INVERNADEROS DESPUÉS DE LA ACTUALIZACIÓN!
+            actualizar_invernaderos()
             flash("Invernadero actualizado correctamente", "success")
             return redirect('/gestion-invernaderos')
             
@@ -1724,7 +1786,6 @@ def editar_invernadero(id):
             if 'conn' in locals() and conn.is_connected():
                 conn.close()
     
-    # Obtener datos del invernadero
     try:
         conn = get_db()
         cursor = conn.cursor(dictionary=True)
@@ -1743,7 +1804,6 @@ def editar_invernadero(id):
         if 'conn' in locals() and conn.is_connected():
             conn.close()
     
-    # Generar formulario HTML
     form_html = f"""
     <div class="container-fluid px-4">
         <div class="d-flex justify-content-between align-items-center mb-4">
@@ -1818,11 +1878,14 @@ def editar_invernadero(id):
 
 @app.route('/eliminar-invernadero/<int:id>')
 def eliminar_invernadero(id):
+    if not session.get('logged_in'):
+        flash('Debes iniciar sesión para acceder a esta página.', 'warning')
+        return redirect(url_for('login'))
+
     try:
         conn = get_db()
         cursor = conn.cursor(dictionary=True)
         
-        # Obtener nombre del invernadero para el mensaje flash
         cursor.execute("SELECT nombre FROM invernaderos WHERE id = %s", (id,))
         invernadero = cursor.fetchone()
         
@@ -1830,10 +1893,9 @@ def eliminar_invernadero(id):
             flash("Invernadero no encontrado", "danger")
             return redirect('/gestion-invernaderos')
         
-        # Eliminar el invernadero
         cursor.execute("DELETE FROM invernaderos WHERE id = %s", (id,))
         conn.commit()
-        actualizar_invernaderos() # ¡ACTUALIZAR INVERNADEROS DESPUÉS DE LA ELIMINACIÓN!
+        actualizar_invernaderos()
         
         flash(f"Invernadero '{invernadero['nombre']}' eliminado correctamente", "success")
         
@@ -1845,14 +1907,19 @@ def eliminar_invernadero(id):
     
     return redirect('/gestion-invernaderos')
 
-
 @app.route('/analisis-comparativo')
 def analisis_comparativo():
     try:
         conn = get_db()
         cursor = conn.cursor(dictionary=True)
-        
-        # Obtener datos históricos de todos los invernaderos
+        cursor.execute("SELECT id, nombre FROM invernaderos ORDER BY id")
+        invernaderos = cursor.fetchall()
+
+        cursor.execute("SELECT MIN(DATE(fecha)) as min_date, MAX(DATE(fecha)) as max_date FROM lecturas")
+        fechas_limite = cursor.fetchone()
+        fecha_minima = fechas_limite['min_date'].strftime('%Y-%m-%d') if fechas_limite['min_date'] else datetime.now().strftime('%Y-%m-%d')
+        fecha_maxima = fechas_limite['max_date'].strftime('%Y-%m-%d') if fechas_limite['max_date'] else datetime.now().strftime('%Y-%m-%d')
+
         cursor.execute("""
             SELECT 
                 i.id as invernadero_id,
@@ -1872,7 +1939,6 @@ def analisis_comparativo():
         """)
         estadisticas = cursor.fetchall()
         
-        # Obtener tendencias recientes (últimas 24 horas) con manejo de NULL
         cursor.execute("""
             SELECT 
                 invernadero_id,
@@ -1913,7 +1979,6 @@ def analisis_comparativo():
         if 'conn' in locals() and conn.is_connected():
             conn.close()
     
-    # Función para convertir Decimal a float
     def convert_decimals(obj):
         if isinstance(obj, Decimal):
             return float(obj)
@@ -1923,28 +1988,23 @@ def analisis_comparativo():
             return [convert_decimals(v) for v in obj]
         return obj
     
-    # Procesar datos para el árbol de decisiones
     analisis = []
     for inv in estadisticas:
         invernadero_id = inv['invernadero_id']
         tendencia = tendencias.get(invernadero_id, {})
         
-        # Convertir Decimal a float
         inv = convert_decimals(inv)
         tendencia = convert_decimals(tendencia)
         
-        # Manejo seguro de valores None
         temp_promedio = inv['temp_promedio'] if inv['temp_promedio'] is not None else None
         humedad_promedio = inv['humedad_promedio'] if inv['humedad_promedio'] is not None else None
         temp_tendencia = tendencia.get('temp_tendencia', None)
         humedad_tendencia = tendencia.get('humedad_tendencia', None)
         
-        # Reglas de decisión (Árbol de decisiones) - MEJORADAS
         estado = "SIN DATOS"
         recomendaciones = []
-        prioridad = 0  # 0=SIN DATOS, 1=ÓPTIMO, 2=ALERTA, 3=CRÍTICO
+        prioridad = 0
 
-        # Análisis de temperatura
         if temp_promedio is not None:
             if temp_promedio > 28:
                 estado = "CRÍTICO"
@@ -1963,7 +2023,6 @@ def analisis_comparativo():
         else:
             recomendaciones.append("❓ No hay datos de temperatura")
 
-        # Análisis de humedad
         if humedad_promedio is not None:
             if humedad_promedio < 30:
                 estado = "CRÍTICO"
@@ -1983,7 +2042,6 @@ def analisis_comparativo():
         else:
             recomendaciones.append("❓ No hay datos de humedad")
 
-        # Análisis combinado (condiciones críticas)
         if temp_promedio is not None and humedad_promedio is not None:
             if temp_promedio > 26 and humedad_promedio < 40:
                 estado = "CRÍTICO"
@@ -1991,7 +2049,6 @@ def analisis_comparativo():
                 recomendaciones.append("🔥 Condición crítica: Alta temperatura + Baja humedad")
                 recomendaciones.append("🏃‍♂️ Acción inmediata requerida")
 
-        # Análisis de tendencias
         if temp_tendencia is not None:
             if temp_tendencia > 2:
                 recomendaciones.append("📈 Temperatura subiendo rápidamente")
@@ -2010,14 +2067,12 @@ def analisis_comparativo():
                     estado = "ALERTA"
                     prioridad = 2
 
-        # Recomendaciones por defecto
         if not recomendaciones:
             recomendaciones.append("✅ Condiciones estables - Mantener operación")
         elif estado == "ÓPTIMO" and len(recomendaciones) == 0:
             recomendaciones.append("✅ Condiciones óptimas - Continuar monitoreo")
         
-        # Determinar clase CSS para el estado
-        clase_estado = "bg-secondary"  # Por defecto (sin datos)
+        clase_estado = "bg-secondary"
         if estado == "ÓPTIMO":
             clase_estado = "bg-success"
         elif estado == "ALERTA":
@@ -2025,7 +2080,6 @@ def analisis_comparativo():
         elif estado == "CRÍTICO":
             clase_estado = "bg-danger"
         
-        # Determinar iconos de tendencia (manejo de None)
         temp_tendencia_icon = (
             "bi-arrow-up text-danger" if temp_tendencia is not None and temp_tendencia > 0 
             else "bi-arrow-down text-primary" if temp_tendencia is not None and temp_tendencia < 0 
@@ -2037,7 +2091,6 @@ def analisis_comparativo():
             else "bi-dash text-secondary"
         )
         
-        # Formatear valores para mostrar
         temp_promedio_display = f"{temp_promedio:.1f}°C" if temp_promedio is not None else "N/A"
         humedad_promedio_display = f"{humedad_promedio:.1f}%" if humedad_promedio is not None else "N/A"
         temp_min_display = f"{inv['temp_min']:.1f}°C" if inv['temp_min'] is not None else "N/A"
@@ -2065,35 +2118,87 @@ def analisis_comparativo():
             'humedad_tendencia_icon': humedad_tendencia_icon
         })
     
-    # Convertir el objeto analisis a una cadena JSON para pasar a JavaScript
     analisis_json = json.dumps(analisis)
 
-    # Generar HTML
     content = f"""
     <div class="container-fluid px-4">
         <div class="d-flex justify-content-between align-items-center mb-4">
             <h1 class="mt-4"><i class="bi bi-diagram-3 me-2"></i>Análisis Comparativo</h1>
-            <div class="dropdown">
-                <button class="btn btn-outline-secondary dropdown-toggle" type="button" 
-                        data-bs-toggle="dropdown" aria-expanded="false">
-                    <i class="bi bi-funnel me-2"></i>Filtrar
+            <div>
+                <button class="btn btn-primary me-2" data-bs-toggle="modal" data-bs-target="#reporteModal">
+                    <i class="bi bi-file-earmark-pdf me-2"></i>Generar Reporte
                 </button>
-                <ul class="dropdown-menu">
-                    <li><a class="dropdown-item" href="#">Todos los invernaderos</a></li>
-                    <li><a class="dropdown-item" href="#">Solo críticos</a></li>
-                    <li><a class="dropdown-item" href="#">Solo alertas</a></li>
-                </ul>
+                <a href="/seleccionar-invernadero-diario" class="btn btn-primary">
+                    <i class="bi bi-file-earmark-text me-2"></i>Reporte Diario
+                </a>
+                <a href="/" class="btn btn-outline-secondary">
+                    <i class="bi bi-arrow-left me-2"></i>Volver
+                </a>
             </div>
         </div>
-        
+
+        <!-- Modal para generar reporte -->
+        <div class="modal fade" id="reporteModal" tabindex="-1" aria-labelledby="reporteModalLabel" aria-hidden="true">
+            <div class="modal-dialog modal-lg">
+                <div class="modal-content">
+                    <div class="modal-header bg-primary text-white">
+                        <h5 class="modal-title" id="reporteModalLabel">
+                            <i class="bi bi-file-earmark-pdf me-2"></i>Generar Reporte Personalizado
+                        </h5>
+                        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                        <form id="reporteForm" action="/generar-reporte" method="POST">
+                            <div class="row mb-4">
+                                <div class="col-md-12">
+                                    <label class="form-label">Seleccionar Invernaderos</label>
+                                    <select class="form-select" name="invernaderos" multiple size="5" required>
+                                        {"".join([f'<option value="{inv["id"]}">{inv["nombre"]} (ID: {inv["id"]})</option>' for inv in invernaderos])}
+                                    </select>
+                                    <small class="text-muted">Mantén presionado Ctrl para seleccionar múltiples</small>
+                                </div>
+                            </div>
+                            
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <label class="form-label">Fecha de Inicio</label>
+                                    <input type="date" class="form-control" name="fecha_inicio" 
+                                           min="{fecha_minima}" max="{fecha_maxima}" 
+                                           value="{fecha_minima}" required>
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label">Fecha de Fin</label>
+                                    <input type="date" class="form-control" name="fecha_fin" 
+                                           min="{fecha_minima}" max="{fecha_maxima}" 
+                                           value="{fecha_maxima}" required>
+                                </div>
+                            </div>
+                            
+                            <div class="mt-4">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" name="incluir_prediccion" id="incluirPrediccion" checked>
+                                    <label class="form-check-label" for="incluirPrediccion">
+                                        Incluir predicción de plagas/enfermedades
+                                    </label>
+                                </div>
+                            </div>
+                        </form>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+                        <button type="submit" form="reporteForm" class="btn btn-primary">
+                            <i class="bi bi-file-earmark-pdf me-2"></i>Generar Reporte
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <!-- Mensaje si no hay datos suficientes -->
         {f'<div class="alert alert-info mb-4">No hay suficientes datos históricos para comparar tendencias. Se mostrarán solo los datos disponibles.</div>' 
          if all(t.get('temp_tendencia') is None and t.get('humedad_tendencia') is None for t in tendencias.values()) 
          else ''}
 
-        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-        
         <div class="row mb-4">
             <div class="col-md-6">
                 <div class="card shadow-sm h-100">
@@ -2364,11 +2469,11 @@ def analisis_comparativo():
         </div>
     </div>
     
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
-    // Datos procesados desde el servidor
     const analisisData = JSON.parse('{analisis_json}');
     
-    // Procesar datos para las gráficas
     const tempData = {{
         labels: [],
         minTemp: [],
@@ -2383,7 +2488,6 @@ def analisis_comparativo():
         maxHum: []
     }};
     
-    // Llenar los datos desde el análisis
     analisisData.forEach(inv => {{
         tempData.labels.push(`Invernadero ${{inv.invernadero_id}}`);
         tempData.minTemp.push(inv.temp_min !== null ? inv.temp_min : null);
@@ -2396,7 +2500,6 @@ def analisis_comparativo():
         humedadData.maxHum.push(inv.humedad_max !== null ? inv.humedad_max : null);
     }});
 
-    // Gráfico de temperaturas
     const tempCtx = document.getElementById('tempChart').getContext('2d');
     const tempChart = new Chart(tempCtx, {{
         type: 'bar',
@@ -2456,7 +2559,6 @@ def analisis_comparativo():
         }}
     }});
     
-    // Gráfico de humedad
     const humedadCtx = document.getElementById('humedadChart').getContext('2d');
     const humedadChart = new Chart(humedadCtx, {{
         type: 'bar',
@@ -2617,10 +2719,879 @@ def analisis_comparativo():
         .table-sm th, .table-sm td {{
             padding: 0.5rem;
         }}
+        
+        /* Estilos para el select múltiple */
+        .form-select[multiple] {{
+            height: auto;
+            min-height: 120px;
+        }}
     </style>
     """
     
     return render_template_string(BASE_HTML, title="Análisis Comparativo", content=content)
+
+@app.route('/generar-reporte', methods=['POST'])
+def generar_reporte():
+    try:
+        invernaderos_seleccionados = request.form.getlist('invernaderos')
+        fecha_inicio = request.form['fecha_inicio']
+        fecha_fin = request.form['fecha_fin']
+        incluir_prediccion = 'incluir_prediccion' in request.form
+        
+        if not invernaderos_seleccionados:
+            flash("Debes seleccionar al menos un invernadero", "danger")
+            return redirect('/analisis-comparativo')
+            
+        fecha_inicio_dt = datetime.strptime(fecha_inicio, '%Y-%m-%d')
+        fecha_fin_dt = datetime.strptime(fecha_fin, '%Y-%m-%d')
+        
+        if fecha_fin_dt < fecha_inicio_dt:
+            flash("La fecha de fin no puede ser anterior a la fecha de inicio", "danger")
+            return redirect('/analisis-comparativo')
+            
+        conn = get_db()
+        cursor = conn.cursor(dictionary=True)
+        
+        placeholders = ','.join(['%s'] * len(invernaderos_seleccionados))
+        cursor.execute(f"SELECT id, nombre FROM invernaderos WHERE id IN ({placeholders})", tuple(invernaderos_seleccionados))
+        nombres_invernaderos = {inv['id']: inv['nombre'] for inv in cursor.fetchall()}
+        
+        query = f"""
+            SELECT 
+                i.id as invernadero_id,
+                i.nombre,
+                DATE(l.fecha) as fecha,
+                AVG(l.temperatura) as temp_promedio,
+                AVG(l.humedad_suelo) as humedad_promedio,
+                MAX(l.temperatura) as temp_max,
+                MIN(l.temperatura) as temp_min,
+                MAX(l.humedad_suelo) as humedad_max,
+                MIN(l.humedad_suelo) as humedad_min
+            FROM invernaderos i
+            JOIN lecturas l ON i.id = l.invernadero_id
+            WHERE i.id IN ({placeholders})
+            AND DATE(l.fecha) BETWEEN %s AND %s
+            GROUP BY i.id, DATE(l.fecha)
+            ORDER BY i.id, DATE(l.fecha)
+        """
+        cursor.execute(query, tuple(invernaderos_seleccionados + [fecha_inicio, fecha_fin]))
+        datos_historicos = cursor.fetchall()
+        
+        if not datos_historicos:
+            flash("No hay datos disponibles para los criterios seleccionados", "warning")
+            return redirect('/analisis-comparativo')
+            
+        datos_por_invernadero = {}
+        fechas = set()
+        
+        for dato in datos_historicos:
+            invernadero_id = dato['invernadero_id']
+            if invernadero_id not in datos_por_invernadero:
+                datos_por_invernadero[invernadero_id] = {
+                    'nombre': dato['nombre'],
+                    'fechas': [],
+                    'temp_promedio': [],
+                    'humedad_promedio': []
+                }
+            
+            fecha_str = dato['fecha'].strftime('%Y-%m-%d')
+            fechas.add(fecha_str)
+            datos_por_invernadero[invernadero_id]['fechas'].append(fecha_str)
+            datos_por_invernadero[invernadero_id]['temp_promedio'].append(float(dato['temp_promedio']))
+            datos_por_invernadero[invernadero_id]['humedad_promedio'].append(float(dato['humedad_promedio']))
+        
+        fechas = sorted(fechas)
+        
+        predicciones = []
+        if incluir_prediccion:
+            for invernadero_id, datos in datos_por_invernadero.items():
+                temp_prom = sum(datos['temp_promedio']) / len(datos['temp_promedio'])
+                humedad_prom = sum(datos['humedad_promedio']) / len(datos['humedad_promedio'])
+                
+                riesgo = "Bajo"
+                problemas = []
+                posibles_plagas = []
+                
+                if temp_prom > 28 and humedad_prom < 40:
+                    riesgo = "Alto"
+                    problemas.append("Condiciones extremas: Alta temperatura y baja humedad")
+                    posibles_plagas.extend(["Ácaros", "Araña roja", "Trips"])
+                elif temp_prom > 25 and humedad_prom > 70:
+                    riesgo = "Alto"
+                    problemas.append("Condiciones favorables para hongos")
+                    posibles_plagas.extend(["Botrytis", "Mildiu", "Oídio"])
+                elif temp_prom > 25:
+                    riesgo = "Moderado"
+                    problemas.append("Temperatura elevada puede favorecer plagas")
+                    posibles_plagas.extend(["Mosca blanca", "Pulgón"])
+                elif humedad_prom > 80:
+                    riesgo = "Moderado" if riesgo == "Bajo" else riesgo
+                    problemas.append("Humedad muy alta favorece enfermedades")
+                    posibles_plagas.extend(["Rhizoctonia", "Pythium"])
+                
+                posibles_plagas = list(set(posibles_plagas))
+                
+                if not problemas:
+                    problemas.append("Condiciones dentro de rangos normales - riesgo mínimo")
+                
+                if not posibles_plagas:
+                    posibles_plagas.append("Ninguna plaga específica identificada")
+                
+                predicciones.append({
+                    'invernadero_id': invernadero_id,
+                    'nombre': datos['nombre'],
+                    'riesgo': riesgo,
+                    'problemas': problemas,
+                    'posibles_plagas': posibles_plagas,
+                    'temp_promedio': temp_prom,
+                    'humedad_promedio': humedad_prom
+                })
+        
+        content = f"""
+        <div class="container-fluid px-4">
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <h1 class="mt-4"><i class="bi bi-file-earmark-text me-2"></i>Reporte de Invernaderos</h1>
+                <div>
+                    <button class="btn btn-outline-primary me-2" onclick="window.print()">
+                        <i class="bi bi-printer me-2"></i>Imprimir Reporte
+                    </button>
+                    <a href="/analisis-comparativo" class="btn btn-outline-secondary">
+                        <i class="bi bi-arrow-left me-2"></i>Volver
+                    </a>
+                </div>
+            </div>
+            
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-white">
+                    <h5 class="mb-0"><i class="bi bi-info-circle me-2"></i>Parámetros del Reporte</h5>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <p><strong>Invernaderos:</strong> {', '.join([nombres_invernaderos[int(id)] for id in invernaderos_seleccionados])}</p>
+                            <p><strong>Fecha de inicio:</strong> {fecha_inicio}</p>
+                        </div>
+                        <div class="col-md-6">
+                            <p><strong>Fecha de fin:</strong> {fecha_fin}</p>
+                            <p><strong>Generado el:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Gráficas comparativas -->
+            <div class="row mb-4">
+                <div class="col-md-6">
+                    <div class="card shadow-sm h-100">
+                        <div class="card-header bg-white">
+                            <h5 class="mb-0"><i class="bi bi-thermometer-half me-2"></i>Evolución de Temperatura</h5>
+                        </div>
+                        <div class="card-body">
+                            <canvas id="tempChart" height="300"></canvas>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="card shadow-sm h-100">
+                        <div class="card-header bg-white">
+                            <h5 class="mb-0"><i class="bi bi-droplet me-2"></i>Evolución de Humedad</h5>
+                        </div>
+                        <div class="card-body">
+                            <canvas id="humedadChart" height="300"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Resumen estadístico -->
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-white">
+                    <h5 class="mb-0"><i class="bi bi-clipboard-data me-2"></i>Resumen Estadístico</h5>
+                </div>
+                <div class="card-body">
+                    <div class="table-responsive">
+                        <table class="table table-bordered">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>Invernadero</th>
+                                    <th>Temperatura Promedio</th>
+                                    <th>Temperatura Máxima</th>
+                                    <th>Temperatura Mínima</th>
+                                    <th>Humedad Promedio</th>
+                                    <th>Humedad Máxima</th>
+                                    <th>Humedad Mínima</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+        """
+        
+        for invernadero_id, datos in datos_por_invernadero.items():
+            temp_prom = sum(datos['temp_promedio']) / len(datos['temp_promedio'])
+            temp_max = max(datos['temp_promedio'])
+            temp_min = min(datos['temp_promedio'])
+            humedad_prom = sum(datos['humedad_promedio']) / len(datos['humedad_promedio'])
+            humedad_max = max(datos['humedad_promedio'])
+            humedad_min = min(datos['humedad_promedio'])
+            
+            content += f"""
+                                <tr>
+                                    <td>{datos['nombre']} (ID: {invernadero_id})</td>
+                                    <td>{temp_prom:.1f}°C</td>
+                                    <td>{temp_max:.1f}°C</td>
+                                    <td>{temp_min:.1f}°C</td>
+                                    <td>{humedad_prom:.1f}%</td>
+                                    <td>{humedad_max:.1f}%</td>
+                                    <td>{humedad_min:.1f}%</td>
+                                </tr>
+            """
+        
+        content += """
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        """
+        
+        if incluir_prediccion and predicciones:
+            content += """
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-white">
+                    <h5 class="mb-0"><i class="bi bi-bug me-2"></i>Predicción de Plagas/Enfermedades</h5>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+            """
+            
+            for pred in predicciones:
+                riesgo_color = "success" if pred['riesgo'] == "Bajo" else "warning" if pred['riesgo'] == "Moderado" else "danger"
+                
+                content += f"""
+                        <div class="col-md-6 mb-4">
+                            <div class="card h-100 border-{riesgo_color}">
+                                <div class="card-header bg-{riesgo_color} bg-opacity-10 d-flex justify-content-between align-items-center">
+                                    <h5 class="mb-0">{pred['nombre']} (ID: {pred['invernadero_id']})</h5>
+                                    <span class="badge bg-{riesgo_color}">Riesgo: {pred['riesgo']}</span>
+                                </div>
+                                <div class="card-body">
+                                    <div class="mb-3">
+                                        <p class="mb-1"><strong>Condiciones promedio:</strong></p>
+                                        <p class="mb-0">Temperatura: {pred['temp_promedio']:.1f}°C | Humedad: {pred['humedad_promedio']:.1f}%</p>
+                                    </div>
+                                    
+                                    <div class="mb-3">
+                                        <p class="mb-1"><strong>Problemas detectados:</strong></p>
+                                        <ul class="mb-2">
+                """
+                
+                for problema in pred['problemas']:
+                    content += f"""
+                                            <li>{problema}</li>
+                    """
+                
+                content += f"""
+                                        </ul>
+                                    </div>
+                                    
+                                    <div>
+                                        <p class="mb-1"><strong>Posibles plagas/enfermedades:</strong></p>
+                                        <div class="d-flex flex-wrap gap-2">
+                        """
+                
+                for plaga in pred['posibles_plagas']:
+                    content += f"""
+                                            <span class="badge bg-secondary">{plaga}</span>
+                    """
+                
+                content += """
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                """
+            
+            content += """
+                    </div>
+                    
+                    <div class="alert alert-info mt-3">
+                        <h5><i class="bi bi-lightbulb me-2"></i>Recomendaciones Generales</h5>
+                        <ul class="mb-0">
+                            <li>Monitorear regularmente los cultivos para detección temprana de plagas</li>
+                            <li>Mantener un registro de las condiciones ambientales y aparición de plagas</li>
+                            <li>Implementar medidas preventivas según el nivel de riesgo identificado</li>
+                            <li>Consultar con un agrónomo para recomendaciones específicas</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            """
+        
+        content += """
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+        <script>
+            document.addEventListener('DOMContentLoaded', function() {
+                const fechas = """ + json.dumps(fechas) + """;
+                const datasetsTemp = [];
+                const datasetsHum = [];
+                
+                const colores = [
+                    'rgb(255, 99, 132)',
+                    'rgb(54, 162, 235)',
+                    'rgb(255, 159, 64)',
+                    'rgb(75, 192, 192)',
+                    'rgb(153, 102, 255)',
+                    'rgb(255, 205, 86)'
+                ];
+                
+                const datosInvernaderos = """ + json.dumps(datos_por_invernadero) + """;
+                
+                let colorIndex = 0;
+                for (const [id, datos] of Object.entries(datosInvernaderos)) {
+                    const color = colores[colorIndex % colores.length];
+                    colorIndex++;
+                    
+                    datasetsTemp.push({
+                        label: `${datos.nombre} (ID: ${id})`,
+                        data: datos.temp_promedio,
+                        borderColor: color,
+                        backgroundColor: color.replace(')', ', 0.2)'),
+                        tension: 0.1,
+                        fill: false
+                    });
+                    
+                    datasetsHum.push({
+                        label: `${datos.nombre} (ID: ${id})`,
+                        data: datos.humedad_promedio,
+                        borderColor: color,
+                        backgroundColor: color.replace(')', ', 0.2)'),
+                        tension: 0.1,
+                        fill: false
+                    });
+                }
+                
+                const tempCtx = document.getElementById('tempChart').getContext('2d');
+                new Chart(tempCtx, {
+                    type: 'line',
+                    data: {
+                        labels: fechas,
+                        datasets: datasetsTemp
+                    },
+                    options: {
+                        responsive: true,
+                        plugins: {
+                            title: {
+                                display: true,
+                                text: 'Comparación de Temperaturas'
+                            },
+                            tooltip: {
+                                callbacks: {
+                                    label: function(context) {
+                                        return `${context.dataset.label}: ${context.raw.toFixed(1)}°C`;
+                                    }
+                                }
+                            }
+                        },
+                        scales: {
+                            y: {
+                                title: {
+                                    display: true,
+                                    text: 'Temperatura (°C)'
+                                }
+                            }
+                        }
+                    }
+                });
+                
+                const humCtx = document.getElementById('humedadChart').getContext('2d');
+                new Chart(humCtx, {
+                    type: 'line',
+                    data: {
+                        labels: fechas,
+                        datasets: datasetsHum
+                    },
+                    options: {
+                        responsive: true,
+                        plugins: {
+                            title: {
+                                display: true,
+                                text: 'Comparación de Humedad'
+                            },
+                            tooltip: {
+                                callbacks: {
+                                    label: function(context) {
+                                        return `${context.dataset.label}: ${context.raw.toFixed(1)}%`;
+                                    }
+                                }
+                            }
+                        },
+                        scales: {
+                            y: {
+                                title: {
+                                    display: true,
+                                    text: 'Humedad (%)'
+                                },
+                                min: 0,
+                                max: 100
+                            }
+                        }
+                    }
+                });
+            });
+        </script>
+        
+        <style>
+            @media print {
+                .navbar, button, a {
+                    display: none !important;
+                }
+                
+                body {
+                    padding: 0;
+                    font-size: 12pt;
+                }
+                
+                .card {
+                    border: 1px solid #ddd;
+                    page-break-inside: avoid;
+                }
+                
+                .table {
+                    font-size: 10pt;
+                }
+                
+                h1, h2, h3, h4, h5 {
+                    page-break-after: avoid;
+                }
+                
+                .badge {
+                    color: #000 !important;
+                    border: 1px solid #000;
+                }
+            }
+            
+            .card-header {
+                background-color: #f8f9fa !important;
+            }
+            
+            .flex-wrap {
+                display: flex;
+                flex-wrap: wrap;
+            }
+            
+            .gap-2 {
+                gap: 0.5rem;
+            }
+        </style>
+        """
+        
+        return render_template_string(BASE_HTML, title="Reporte de Invernaderos", content=content)
+        
+    except Exception as e:
+        flash(f"Error al generar el reporte: {str(e)}", "danger")
+        return redirect('/analisis-comparativo')
+    finally:
+        if 'conn' in locals() and conn.is_connected():
+            conn.close()
+
+@app.route('/seleccionar-invernadero-diario', methods=['GET'])
+def seleccionar_invernadero_diario():
+    """
+    Renders a form to select a single greenhouse for the daily report.
+    """
+    try:
+        conn = get_db()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT id, nombre FROM invernaderos ORDER BY id")
+        invernaderos = cursor.fetchall()
+    except Exception as e:
+        flash(f"Error al cargar invernaderos: {str(e)}", "danger")
+        invernaderos = []
+    finally:
+        if 'conn' in locals() and conn.is_connected():
+            conn.close()
+
+    content = f"""
+    <div class="container-fluid px-4">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1 class="mt-4"><i class="bi bi-file-earmark-text me-2"></i>Generar Reporte Diario por Invernadero</h1>
+            <a href="/analisis-comparativo" class="btn btn-outline-secondary">
+                <i class="bi bi-arrow-left me-2"></i>Volver a Análisis Comparativo
+            </a>
+        </div>
+        
+        <div class="card shadow-sm border-0">
+            <div class="card-body p-4">
+                <form action="/generar-reporte-diario" method="POST">
+                    <div class="mb-4">
+                        <label for="invernadero_id" class="form-label">Seleccionar Invernadero</label>
+                        <select class="form-select" id="invernadero_id" name="invernadero_id" required>
+                            <option value="">-- Seleccione un invernadero --</option>
+                            {"".join([f'<option value="{inv["id"]}">{inv["nombre"]} (ID: {inv["id"]})</option>' for inv in invernaderos])}
+                        </select>
+                    </div>
+                    <div class="d-flex justify-content-end">
+                        <button type="submit" class="btn btn-primary">
+                            <i class="bi bi-file-earmark-text me-2"></i>Generar Reporte Diario
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+    """
+    return render_template_string(BASE_HTML, title="Seleccionar Invernadero", content=content)
+
+
+@app.route('/generar-reporte-diario', methods=['POST'])
+def generar_reporte_diario():
+    try:
+        invernadero_id = request.form.get('invernadero_id')
+        if not invernadero_id:
+            flash("Debes seleccionar un invernadero para generar el reporte diario.", "danger")
+            return redirect('/seleccionar-invernadero-diario')
+        
+        invernadero_id = int(invernadero_id) # Convertir a entero
+        
+        # Obtener el nombre del invernadero seleccionado
+        nombre_invernadero = INVERNADEROS.get(invernadero_id, f"Invernadero {invernadero_id}")
+
+        fecha_actual = datetime.now().strftime('%Y-%m-%d')
+        
+        conn = get_db()
+        cursor = conn.cursor(dictionary=True)
+        
+        # Modificación: Consulta para agrupar datos en intervalos de 10 minutos para un invernadero específico
+        query = """
+            SELECT 
+                DATE_FORMAT(
+                    FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(fecha) / (10 * 60)) * (10 * 60)),
+                    '%H:%i'
+                ) as hora_intervalo,
+                AVG(temperatura) as temp_promedio,
+                AVG(humedad_suelo) as humedad_promedio,
+                MAX(temperatura) as temp_max,
+                MIN(temperatura) as temp_min,
+                MAX(humedad_suelo) as humedad_max,
+                MIN(humedad_suelo) as humedad_min
+            FROM lecturas 
+            WHERE invernadero_id = %s
+            AND DATE(fecha) = %s
+            GROUP BY hora_intervalo 
+            ORDER BY hora_intervalo
+        """
+        
+        cursor.execute(query, (invernadero_id, fecha_actual))
+        datos_diarios = cursor.fetchall()
+        
+        if not datos_diarios:
+            flash(f"No hay datos disponibles para el invernadero {nombre_invernadero} ({invernadero_id}) el día {fecha_actual}", "warning")
+            return redirect('/seleccionar-invernadero-diario')
+            
+        # Procesar datos para gráficas y tabla
+        horas_labels = []
+        temp_promedio_data = []
+        humedad_promedio_data = []
+        temp_max_data = []
+        temp_min_data = []
+        humedad_max_data = []
+        humedad_min_data = []
+
+        for dato in datos_diarios:
+            horas_labels.append(dato['hora_intervalo'])
+            temp_promedio_data.append(float(dato['temp_promedio']))
+            humedad_promedio_data.append(float(dato['humedad_promedio']))
+            temp_max_data.append(float(dato['temp_max']))
+            temp_min_data.append(float(dato['temp_min']))
+            humedad_max_data.append(float(dato['humedad_max']))
+            humedad_min_data.append(float(dato['humedad_min']))
+        
+        # Calcular promedios y extremos del día para el resumen
+        temp_prom_dia = sum(temp_promedio_data) / len(temp_promedio_data) if temp_promedio_data else 0
+        temp_max_dia = max(temp_max_data) if temp_max_data else 0
+        temp_min_dia = min(temp_min_data) if temp_min_data else 0
+        humedad_prom_dia = sum(humedad_promedio_data) / len(humedad_promedio_data) if humedad_promedio_data else 0
+        humedad_max_dia = max(humedad_max_data) if humedad_max_data else 0
+        humedad_min_dia = min(humedad_min_data) if humedad_min_data else 0
+
+        # Identificar hora pico para temperatura y humedad (si hay datos)
+        hora_temp_max = horas_labels[temp_max_data.index(temp_max_dia)] if temp_max_data else "N/A"
+        hora_temp_min = horas_labels[temp_min_data.index(temp_min_dia)] if temp_min_data else "N/A"
+        hora_humedad_max = horas_labels[humedad_max_data.index(humedad_max_dia)] if humedad_max_data else "N/A"
+        hora_humedad_min = horas_labels[humedad_min_data.index(humedad_min_dia)] if humedad_min_data else "N/A"
+
+        content = f"""
+        <div class="container-fluid px-4">
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <h1 class="mt-4"><i class="bi bi-file-earmark-text me-2"></i>Reporte Diario - {nombre_invernadero} (ID: {invernadero_id})</h1>
+                <div>
+                    <button class="btn btn-outline-primary me-2" onclick="window.print()">
+                        <i class="bi bi-printer me-2"></i>Imprimir Reporte
+                    </button>
+                    <a href="/seleccionar-invernadero-diario" class="btn btn-outline-secondary">
+                        <i class="bi bi-arrow-left me-2"></i>Volver a Selección
+                    </a>
+                </div>
+            </div>
+            
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-white">
+                    <h5 class="mb-0"><i class="bi bi-info-circle me-2"></i>Parámetros del Reporte</h5>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <p><strong>Invernadero:</strong> {nombre_invernadero} (ID: {invernadero_id})</p>
+                            <p><strong>Fecha:</strong> {fecha_actual}</p>
+                        </div>
+                        <div class="col-md-6">
+                            <p><strong>Generado el:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Gráficas diarias -->
+            <div class="row mb-4">
+                <div class="col-md-6">
+                    <div class="card shadow-sm h-100">
+                        <div class="card-header bg-white">
+                            <h5 class="mb-0"><i class="bi bi-thermometer-half me-2"></i>Temperatura por Intervalo de 10 Minutos</h5>
+                        </div>
+                        <div class="card-body">
+                            <canvas id="tempChart" height="300"></canvas>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="card shadow-sm h-100">
+                        <div class="card-header bg-white">
+                            <h5 class="mb-0"><i class="bi bi-droplet me-2"></i>Humedad por Intervalo de 10 Minutos</h5>
+                        </div>
+                        <div class="card-body">
+                            <canvas id="humedadChart" height="300"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Resumen estadístico por invernadero -->
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-white">
+                    <h5 class="mb-0"><i class="bi bi-clipboard-data me-2"></i>Resumen Diario</h5>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <h5><i class="bi bi-thermometer-half me-2"></i>Temperatura</h5>
+                            <ul class="list-group mb-3">
+                                <li class="list-group-item d-flex justify-content-between align-items-center">
+                                    Promedio
+                                    <span class="badge bg-primary rounded-pill">{temp_prom_dia:.1f}°C</span>
+                                </li>
+                                <li class="list-group-item d-flex justify-content-between align-items-center">
+                                    Máxima ({hora_temp_max})
+                                    <span class="badge bg-danger rounded-pill">{temp_max_dia:.1f}°C</span>
+                                </li>
+                                <li class="list-group-item d-flex justify-content-between align-items-center">
+                                    Mínima ({hora_temp_min})
+                                    <span class="badge bg-info rounded-pill">{temp_min_dia:.1f}°C</span>
+                                </li>
+                            </ul>
+                        </div>
+                        <div class="col-md-6">
+                            <h5><i class="bi bi-droplet me-2"></i>Humedad</h5>
+                            <ul class="list-group mb-3">
+                                <li class="list-group-item d-flex justify-content-between align-items-center">
+                                    Promedio
+                                    <span class="badge bg-primary rounded-pill">{humedad_prom_dia:.1f}%</span>
+                                </li>
+                                <li class="list-group-item d-flex justify-content-between align-items-center">
+                                    Máxima ({hora_humedad_max})
+                                    <span class="badge bg-success rounded-pill">{humedad_max_dia:.1f}%</span>
+                                </li>
+                                <li class="list-group-item d-flex justify-content-between align-items-center">
+                                    Mínima ({hora_humedad_min})
+                                    <span class="badge bg-warning rounded-pill">{humedad_min_dia:.1f}%</span>
+                                </li>
+                            </ul>
+                        </div>
+                    </div>
+                    
+                    <div class="mt-3">
+                        <h5><i class="bi bi-graph-up me-2"></i>Variación por Intervalo de 10 Minutos</h5>
+                        <div class="table-responsive">
+                            <table class="table table-sm table-bordered">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>Hora</th>
+                                        <th>Temp. Prom.</th>
+                                        <th>Temp. Máx.</th>
+                                        <th>Temp. Mín.</th>
+                                        <th>Hum. Prom.</th>
+                                        <th>Hum. Máx.</th>
+                                        <th>Hum. Mín.</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+        """
+        
+        for i in range(len(horas_labels)):
+            content += f"""
+                                    <tr>
+                                        <td>{horas_labels[i]}</td>
+                                        <td>{temp_promedio_data[i]:.1f}°C</td>
+                                        <td>{temp_max_data[i]:.1f}°C</td>
+                                        <td>{temp_min_data[i]:.1f}°C</td>
+                                        <td>{humedad_promedio_data[i]:.1f}%</td>
+                                        <td>{humedad_max_data[i]:.1f}%</td>
+                                        <td>{humedad_min_data[i]:.1f}%</td>
+                                    </tr>
+            """
+        
+        content += """
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Recomendaciones generales -->
+            <div class="card shadow-sm mb-4 border-primary">
+                <div class="card-header bg-primary bg-opacity-10">
+                    <h5 class="mb-0"><i class="bi bi-lightbulb me-2"></i>Recomendaciones Generales</h5>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <h6><i class="bi bi-thermometer-sun me-2"></i>Sobre Temperatura</h6>
+                            <ul>
+                                <li>Verificar que los sistemas de ventilación estén funcionando correctamente</li>
+                                <li>Considerar implementar sombreado si las temperaturas máximas superan los 30°C</li>
+                                <li>Revisar sistemas de calefacción si las mínimas son muy bajas</li>
+                            </ul>
+                        </div>
+                        <div class="col-md-6">
+                            <h6><i class="bi bi-droplet-fill me-2"></i>Sobre Humedad</h6>
+                            <ul>
+                                <li>Asegurar que los sistemas de riego estén funcionando adecuadamente</li>
+                                <li>Verificar drenaje si la humedad se mantiene constantemente alta</li>
+                                <li>Considerar ventilación adicional si hay exceso de humedad</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+            <script>
+                document.addEventListener('DOMContentLoaded', function() {
+                    const horas = """ + json.dumps(horas_labels) + """;
+                    const tempPromedio = """ + json.dumps(temp_promedio_data) + """;
+                    const humedadPromedio = """ + json.dumps(humedad_promedio_data) + """;
+                    
+                    const colores = [
+                        'rgb(255, 99, 132)',
+                        'rgb(54, 162, 235)'
+                    ];
+                    
+                    // Gráfica de temperatura
+                    const tempCtx = document.getElementById('tempChart').getContext('2d');
+                    new Chart(tempCtx, {
+                        type: 'line',
+                        data: {
+                            labels: horas,
+                            datasets: [{
+                                label: 'Temperatura Promedio (°C)',
+                                data: tempPromedio,
+                                borderColor: colores[0],
+                                backgroundColor: colores[0].replace(')', ', 0.2)'),
+                                tension: 0.1,
+                                fill: false
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            plugins: {
+                                title: {
+                                    display: true,
+                                    text: 'Temperatura por Intervalo de 10 Minutos'
+                                },
+                                tooltip: {
+                                    callbacks: {
+                                        label: function(context) {
+                                            return `${context.dataset.label}: ${context.raw.toFixed(1)}°C`;
+                                        }
+                                    }
+                                }
+                            },
+                            scales: {
+                                y: {
+                                    title: {
+                                        display: true,
+                                        text: 'Temperatura (°C)'
+                                    }
+                                }
+                            }
+                        }
+                    });
+                    
+                    // Gráfica de humedad
+                    const humCtx = document.getElementById('humedadChart').getContext('2d');
+                    new Chart(humCtx, {
+                        type: 'line',
+                        data: {
+                            labels: horas,
+                            datasets: [{
+                                label: 'Humedad Promedio (%)',
+                                data: humedadPromedio,
+                                borderColor: colores[1],
+                                backgroundColor: colores[1].replace(')', ', 0.2)'),
+                                tension: 0.1,
+                                fill: false
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            plugins: {
+                                title: {
+                                    display: true,
+                                    text: 'Humedad por Intervalo de 10 Minutos'
+                                },
+                                tooltip: {
+                                    callbacks: {
+                                        label: function(context) {
+                                            return `${context.dataset.label}: ${context.raw.toFixed(1)}%`;
+                                        }
+                                    }
+                                }
+                            },
+                            scales: {
+                                y: {
+                                    title: {
+                                        display: true,
+                                        text: 'Humedad (%)'
+                                    },
+                                    min: 0,
+                                    max: 100
+                                }
+                            }
+                        }
+                    });
+                });
+            </script>
+        </div>
+        """
+        
+        return render_template_string(BASE_HTML, title="Reporte Diario", content=content)
+        
+    except Exception as e:
+        flash(f"Error al generar el reporte diario: {str(e)}", "danger")
+        return redirect('/')
+    finally:
+        if 'conn' in locals() and conn.is_connected():
+            conn.close()
 
 def enviar_alerta_whatsapp(mensaje):
     def enviar():
@@ -2653,17 +3624,13 @@ def asignar_lectura_automatica(invernadero_id, lectura):
         conn = get_db()
         cursor = conn.cursor()
         
-        # Insertar la lectura en la base de datos
         cursor.execute("""
             INSERT INTO lecturas (invernadero_id, temperatura, humedad_suelo, fecha)
             VALUES (%s, %s, %s, %s)
         """, (invernadero_id, lectura['temperatura'], lectura['humedad'], lectura['fecha']))
 
-        # Verificar temperatura alta
         if lectura['temperatura'] > ALERT_TEMP:
-            if not ultimas_alertas_temp.get(invernadero_id, False): # Usar .get() para evitar KeyError si el ID es nuevo
-                # Mensaje simple para la base de datos
-                # Asegurarse de que el nombre del invernadero se obtenga dinámicamente si INVERNADEROS no está actualizado
+            if not ultimas_alertas_temp.get(invernadero_id, False):
                 nombre_invernadero = INVERNADEROS.get(invernadero_id, f"Invernadero {invernadero_id}")
                 mensaje_temp = f"Temperatura crítica: {lectura['temperatura']}°C en {nombre_invernadero}"
                 
@@ -2672,7 +3639,6 @@ def asignar_lectura_automatica(invernadero_id, lectura):
                     VALUES (%s, %s, %s, %s)
                 """, (invernadero_id, "TEMP_ALTA", mensaje_temp, lectura['fecha']))
                 
-                # Mensaje detallado para WhatsApp
                 mensaje_whatsapp = f"""🌡️ *ALERTA DEL INVERNADERO NÚMERO {invernadero_id}*
 *Invernadero*: {nombre_invernadero}
 *Tipo*: Temperatura Alta
@@ -2682,15 +3648,13 @@ def asignar_lectura_automatica(invernadero_id, lectura):
                 
                 ultimas_alertas_temp[invernadero_id] = True
         else:
-            # Temperatura bajó del umbral, resetear el estado
+
             ultimas_alertas_temp[invernadero_id] = False
 
-        # Manejo de humedad del suelo (formato similar al de temperatura)
         estado_actual = estado_suelo(lectura['humedad'])
-        estado_anterior = ultimos_estados.get(invernadero_id) # Usar .get() para evitar KeyError
+        estado_anterior = ultimos_estados.get(invernadero_id)
         
         if estado_actual != estado_anterior and estado_actual in ["Seco"]:
-            # Mensaje simple para la base de datos
             nombre_invernadero = INVERNADEROS.get(invernadero_id, f"Invernadero {invernadero_id}")
             mensaje_suelo_db = f"Suelo seco detectado: {lectura['humedad']}% en {nombre_invernadero}"
             
@@ -2700,7 +3664,6 @@ def asignar_lectura_automatica(invernadero_id, lectura):
             """, (invernadero_id, "SUELO_SECO", mensaje_suelo_db, lectura['fecha']))
             
             if estado_actual == "Seco":
-                # Mensaje detallado para WhatsApp
                 mensaje_suelo_whatsapp = f"""💧 *ALERTA DEL INVERNADERO NÚMERO {invernadero_id}*
 *Invernadero*: {nombre_invernadero}
 *Tipo*: Suelo Seco
