@@ -1,3 +1,4 @@
+import json
 from flask import Flask, request, jsonify, render_template_string, flash, redirect, url_for
 import mysql.connector
 from datetime import datetime, timedelta
@@ -5,19 +6,14 @@ from collections import deque
 import requests
 import threading
 from decimal import Decimal
-import json
 
 app = Flask(__name__)
 app.secret_key = "tu_clave_secreta"
 
-# Configuración
-INVERNADEROS = {
-    1: "Invernadero de Claveles",
-    2: "Invernadero de Claveles", 
-    3: "Invernadero de Claveles",
-    4: "Invernadero de Claveles",
-    5: "Invernadero de Claveles"
-}
+# Configuración inicial (estos valores serán actualizados por actualizar_invernaderos())
+# Se mantiene la estructura para que las variables globales puedan ser inicializadas,
+# pero su contenido real vendrá de la base de datos.
+INVERNADEROS = {} # Se inicializa vacío, se llenará desde la DB
 
 ALERT_TEMP =  30 # Umbral de temperatura para alertas
 
@@ -42,6 +38,11 @@ def get_db():
     )
 
 def actualizar_invernaderos():
+    """
+    Actualiza el diccionario global INVERNADEROS y las variables de estado
+    (ultimas_lecturas, ultimos_estados, ultimas_alertas_temp)
+    con los datos más recientes de la base de datos.
+    """
     global INVERNADEROS, ultimas_lecturas, ultimos_estados, ultimas_alertas_temp
     try:
         conn = get_db()
@@ -50,37 +51,37 @@ def actualizar_invernaderos():
         cursor.execute("SELECT id, nombre FROM invernaderos ORDER BY id")
         invernaderos_db = cursor.fetchall()
         
-        # Actualizar el diccionario INVERNADEROS
+        # Crear un nuevo diccionario de invernaderos
         nuevos_invernaderos = {row['id']: row['nombre'] for row in invernaderos_db}
         
-        # Actualizar variables dependientes
+        # Identificar IDs actuales y nuevos
         nuevos_ids = set(nuevos_invernaderos.keys())
         ids_actuales = set(INVERNADEROS.keys())
         
-        # Agregar nuevos invernaderos a las variables de estado
+        # Agregar nuevos invernaderos a las variables de estado si no existen
         for id_nuevo in nuevos_ids - ids_actuales:
             ultimas_lecturas[id_nuevo] = None
             ultimos_estados[id_nuevo] = None
             ultimas_alertas_temp[id_nuevo] = False
         
-        # Eliminar invernaderos removidos
+        # Eliminar invernaderos removidos de las variables de estado
         for id_eliminar in ids_actuales - nuevos_ids:
             ultimas_lecturas.pop(id_eliminar, None)
             ultimos_estados.pop(id_eliminar, None)
             ultimas_alertas_temp.pop(id_eliminar, None)
         
+        # Actualizar el diccionario global INVERNADEROS
         INVERNADEROS = nuevos_invernaderos
         
+        print(f"INVERNADEROS actualizados: {INVERNADEROS}")
+        
     except Exception as e:
-        print(f"Error al actualizar INVERNADEROS: {str(e)}")
-        # Mantener valores por defecto si hay error
-        INVERNADEROS = {
-            1: "Invernadero de Claveles",
-            2: "Invernadero de Claveles", 
-            3: "Invernadero de Claveles",
-            4: "Invernadero de Claveles",
-            5: "Invernadero de Claveles"
-        }
+        print(f"Error al actualizar INVERNADEROS desde la DB: {str(e)}")
+        # Si hay un error, se mantiene el estado anterior o un estado vacío
+        INVERNADEROS = {} 
+        ultimas_lecturas = {}
+        ultimos_estados = {}
+        ultimas_alertas_temp = {}
     finally:
         if 'conn' in locals() and conn.is_connected():
             conn.close()
@@ -89,11 +90,12 @@ def actualizar_invernaderos():
 # Variables globales para almacenar lecturas
 lecturas_sensor = []  # Lista para almacenar todas las lecturas del sensor
 asignacion_activa = None  # Almacena el ID del invernadero activo
-ultimas_lecturas = {invernadero_id: None for invernadero_id in INVERNADEROS.keys()} 
-ultimos_estados = {invernadero_id: None for invernadero_id in INVERNADEROS.keys()}  # Para seguimiento de estados
-ultimas_alertas_temp = {invernadero_id: False for invernadero_id in INVERNADEROS.keys()}
+# Inicializar estas variables como diccionarios vacíos, serán poblados por actualizar_invernaderos()
+ultimas_lecturas = {} 
+ultimos_estados = {}  
+ultimas_alertas_temp = {} 
 
-# Al final de las definiciones globales, antes de las rutas
+# Llama a esta función al inicio de la aplicación para cargar los invernaderos desde la base de datos
 actualizar_invernaderos()
 
 
@@ -107,6 +109,10 @@ BASE_HTML = """
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
   <style>
+    body {
+        font-family: 'Inter', sans-serif;
+        background-color: #f8f9fa;
+    }
     .dashboard-card { 
       transition: all 0.3s; 
       height: 100%; 
@@ -162,6 +168,137 @@ BASE_HTML = """
     @keyframes fadeIn {
       from { opacity: 0; }
       to { opacity: 1; }
+    }
+    .card {
+        border-radius: 0.75rem;
+        border: none;
+    }
+    .card-header {
+        border-bottom: 1px solid #e9ecef;
+        background-color: #fff;
+        border-top-left-radius: 0.75rem;
+        border-top-right-radius: 0.75rem;
+    }
+    .table-hover tbody tr:hover {
+        background-color: #f1f3f5;
+    }
+    .badge {
+        padding: 0.5em 0.75em;
+        font-size: 0.85em;
+    }
+    .avatar {
+        width: 36px;
+        height: 36px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 0.9em;
+        font-weight: 600;
+    }
+    .avatar-initial {
+        width: 100%;
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    .decision-tree {
+        font-family: Arial, sans-serif;
+        margin: 20px 0;
+    }
+    
+    .node {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        position: relative;
+        margin: 0 10px;
+    }
+    
+    .node-content {
+        padding: 10px 15px;
+        border-radius: 5px;
+        margin-bottom: 10px;
+        text-align: center;
+        min-width: 200px;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        transition: all 0.3s ease;
+    }
+    
+    .node-content:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+    }
+    
+    .children {
+        display: flex;
+        justify-content: center;
+        padding-top: 20px;
+        position: relative;
+    }
+    
+    .branch {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        position: relative;
+        padding: 0 20px;
+    }
+    
+    .branch:before {
+        content: '';
+        position: absolute;
+        top: 0;
+        height: 20px;
+        width: 1px;
+        background-color: #ccc;
+    }
+    
+    .leaf .node-content {
+        background-color: #f8f9fa;
+        border: 1px solid #dee2e6;
+    }
+    
+    .node.root {
+        margin-top: 0;
+    }
+    
+    .node.root .node-content {
+        font-weight: bold;
+        font-size: 1.1em;
+    }
+    
+    /* Animaciones para el árbol */
+    @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(10px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+    
+    .node {
+        animation: fadeIn 0.5s ease-out;
+    }
+    
+    /* Estilos para el modal */
+    .modal-header {
+        border-bottom: none;
+        padding-bottom: 0;
+    }
+    
+    .modal-body h5 {
+        color: #0d6efd;
+        margin-top: 1rem;
+    }
+    
+    .modal-body ul, .modal-body ol {
+        padding-left: 1.5rem;
+    }
+    
+    .modal-body li {
+        margin-bottom: 0.5rem;
+    }
+    
+    .table-sm th, .table-sm td {
+        padding: 0.5rem;
     }
   </style>
   
@@ -570,6 +707,7 @@ def estado_invernadero(invernadero_id):
         if 'conn' in locals() and conn.is_connected():
             conn.close()
 
+
 # Página principal
 @app.route('/')
 def home():
@@ -614,7 +752,7 @@ def home():
         fecha_alerta = alerta['fecha']
         tiempo_transcurrido = datetime.now() - fecha_alerta
         minutos = int(tiempo_transcurrido.total_seconds() / 60)
-        horas = int(minutos / 60)
+        horas = int(minutos / 60) 
         
         if horas > 24:
             dias = int(horas / 24)
@@ -1029,6 +1167,7 @@ def listar_invernaderos():
 def detalle_invernadero(invernadero_id):
     global asignacion_activa
     
+    # Verificar si el invernadero existe en el diccionario global (actualizado)
     if invernadero_id not in INVERNADEROS:
         flash("Invernadero no encontrado")
         return redirect(url_for('listar_invernaderos'))
@@ -1059,7 +1198,7 @@ def detalle_invernadero(invernadero_id):
     tabla_lecturas = f"""
     <div class="card mb-4">
       <div class="card-header d-flex justify-content-between align-items-center">
-        <h3 class="mb-0">Lecturas Recientes - {INVERNADEROS[invernadero_id]} ({invernadero_id})</h3>
+        <h3 class="mb-0">Lecturas Recientes - {INVERNADEROS.get(invernadero_id, f"Invernadero {invernadero_id}")} ({invernadero_id})</h3>
         <button id="btn-actualizar" class="btn btn-sm btn-outline-primary">Actualizar Ahora</button>
       </div>
       <div class="card-body">
@@ -1111,7 +1250,7 @@ def detalle_invernadero(invernadero_id):
     # Contenido completo con gráficas separadas
     content = f"""
     <div class="d-flex justify-content-between align-items-center mb-4">
-      <h2>{INVERNADEROS[invernadero_id]} ({invernadero_id})</h2>
+      <h2>{INVERNADEROS.get(invernadero_id, f"Invernadero {invernadero_id}")} ({invernadero_id})</h2>
       <div>
         <span id="status-indicator" class="badge bg-success me-2">Conectado</span>
         <a href="/invernaderos" class="btn btn-outline-secondary"> <i class="bi bi-arrow-left">Volver</i></a>
@@ -1151,7 +1290,7 @@ def detalle_invernadero(invernadero_id):
 
     return render_template_string(
         BASE_HTML,
-        title=f"Detalles - {INVERNADEROS[invernadero_id]}",
+        title=f"Detalles - {INVERNADEROS.get(invernadero_id, f'Invernadero {invernadero_id}')}",
         content=content,
         ALERT_TEMP=ALERT_TEMP
     )
@@ -1247,6 +1386,7 @@ def alertas():
     """
 
     for alerta in alertas_db:
+        # Usar INVERNADEROS.get() para obtener el nombre, con un fallback
         nombre_invernadero = INVERNADEROS.get(alerta['invernadero_id'], f"Invernadero {alerta['invernadero_id']}")
         tabla += f"""
               <tr>
@@ -1476,6 +1616,7 @@ def agregar_invernadero():
             """, (nombre, cantidad_claveles, encargado))
             
             conn.commit()
+            actualizar_invernaderos() # ¡ACTUALIZAR INVERNADEROS DESPUÉS DE LA INSERCIÓN!
             flash("Invernadero agregado correctamente", "success")
             return redirect('/gestion-invernaderos')
             
@@ -1573,6 +1714,7 @@ def editar_invernadero(id):
             """, (nombre, cantidad_claveles, encargado, id))
             
             conn.commit()
+            actualizar_invernaderos() # ¡ACTUALIZAR INVERNADEROS DESPUÉS DE LA ACTUALIZACIÓN!
             flash("Invernadero actualizado correctamente", "success")
             return redirect('/gestion-invernaderos')
             
@@ -1691,6 +1833,7 @@ def eliminar_invernadero(id):
         # Eliminar el invernadero
         cursor.execute("DELETE FROM invernaderos WHERE id = %s", (id,))
         conn.commit()
+        actualizar_invernaderos() # ¡ACTUALIZAR INVERNADEROS DESPUÉS DE LA ELIMINACIÓN!
         
         flash(f"Invernadero '{invernadero['nombre']}' eliminado correctamente", "success")
         
@@ -2518,9 +2661,11 @@ def asignar_lectura_automatica(invernadero_id, lectura):
 
         # Verificar temperatura alta
         if lectura['temperatura'] > ALERT_TEMP:
-            if not ultimas_alertas_temp[invernadero_id]:
+            if not ultimas_alertas_temp.get(invernadero_id, False): # Usar .get() para evitar KeyError si el ID es nuevo
                 # Mensaje simple para la base de datos
-                mensaje_temp = f"Temperatura crítica: {lectura['temperatura']}°C en {INVERNADEROS[invernadero_id]}"
+                # Asegurarse de que el nombre del invernadero se obtenga dinámicamente si INVERNADEROS no está actualizado
+                nombre_invernadero = INVERNADEROS.get(invernadero_id, f"Invernadero {invernadero_id}")
+                mensaje_temp = f"Temperatura crítica: {lectura['temperatura']}°C en {nombre_invernadero}"
                 
                 cursor.execute("""
                     INSERT INTO alertas (invernadero_id, tipo, descripcion, fecha)
@@ -2529,7 +2674,7 @@ def asignar_lectura_automatica(invernadero_id, lectura):
                 
                 # Mensaje detallado para WhatsApp
                 mensaje_whatsapp = f"""🌡️ *ALERTA DEL INVERNADERO NÚMERO {invernadero_id}*
-*Invernadero*: {INVERNADEROS[invernadero_id]}
+*Invernadero*: {nombre_invernadero}
 *Tipo*: Temperatura Alta
 *Descripción*: {mensaje_temp}
 *Fecha*: {lectura['fecha'].strftime('%Y-%m-%d %H:%M:%S')}"""
@@ -2542,11 +2687,12 @@ def asignar_lectura_automatica(invernadero_id, lectura):
 
         # Manejo de humedad del suelo (formato similar al de temperatura)
         estado_actual = estado_suelo(lectura['humedad'])
-        estado_anterior = ultimos_estados[invernadero_id]
+        estado_anterior = ultimos_estados.get(invernadero_id) # Usar .get() para evitar KeyError
         
         if estado_actual != estado_anterior and estado_actual in ["Seco"]:
             # Mensaje simple para la base de datos
-            mensaje_suelo_db = f"Suelo seco detectado: {lectura['humedad']}% en {INVERNADEROS[invernadero_id]}"
+            nombre_invernadero = INVERNADEROS.get(invernadero_id, f"Invernadero {invernadero_id}")
+            mensaje_suelo_db = f"Suelo seco detectado: {lectura['humedad']}% en {nombre_invernadero}"
             
             cursor.execute("""
                 INSERT INTO alertas (invernadero_id, tipo, descripcion, fecha)
@@ -2556,7 +2702,7 @@ def asignar_lectura_automatica(invernadero_id, lectura):
             if estado_actual == "Seco":
                 # Mensaje detallado para WhatsApp
                 mensaje_suelo_whatsapp = f"""💧 *ALERTA DEL INVERNADERO NÚMERO {invernadero_id}*
-*Invernadero*: {INVERNADEROS[invernadero_id]}
+*Invernadero*: {nombre_invernadero}
 *Tipo*: Suelo Seco
 *Descripción*: {mensaje_suelo_db}
 *Fecha*: {lectura['fecha'].strftime('%Y-%m-%d %H:%M:%S')}"""
