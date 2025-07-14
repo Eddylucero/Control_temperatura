@@ -9,7 +9,7 @@ from decimal import Decimal
 
 # --- Configuración y Variables Globales ---
 app = Flask(__name__)
-app.secret_key = "tu_clave_secreta_muy_segura" # ¡Cambia esto por una clave secreta fuerte en producción!
+app.secret_key = "tu_clave_secreta_muy_segura"
 
 INVERNADEROS = {} 
 ALERT_TEMP = 25 
@@ -34,7 +34,7 @@ def get_db():
         host="localhost",
         user="root",
         password="admin",
-        database="db_invernaderos"
+        database="db_invernadero"
     )
 
 def actualizar_invernaderos():
@@ -2125,10 +2125,10 @@ def analisis_comparativo():
         <div class="d-flex justify-content-between align-items-center mb-4">
             <h1 class="mt-4"><i class="bi bi-diagram-3 me-2"></i>Análisis Comparativo</h1>
             <div>
-                <button class="btn btn-primary me-2" data-bs-toggle="modal" data-bs-target="#reporteModal">
+                <button class="btn btn-outline-success me-2" data-bs-toggle="modal" data-bs-target="#reporteModal">
                     <i class="bi bi-file-earmark-pdf me-2"></i>Generar Reporte
                 </button>
-                <a href="/seleccionar-invernadero-diario" class="btn btn-primary">
+                <a href="/seleccionar-invernadero-diario" class="btn btn-outline-primary">
                     <i class="bi bi-file-earmark-text me-2"></i>Reporte Diario
                 </a>
                 <a href="/" class="btn btn-outline-secondary">
@@ -2185,8 +2185,8 @@ def analisis_comparativo():
                         </form>
                     </div>
                     <div class="modal-footer">
-                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
-                        <button type="submit" form="reporteForm" class="btn btn-primary">
+                        <button type="button" class="btn btn-outline-danger" data-bs-dismiss="modal">Cancelar</button>
+                        <button type="submit" form="reporteForm" class="btn btn-outline-primary">
                             <i class="bi bi-file-earmark-pdf me-2"></i>Generar Reporte
                         </button>
                     </div>
@@ -2463,7 +2463,7 @@ def analisis_comparativo():
                     </div>
                 </div>
                 <div class="modal-footer">
-                    <button type="button" class="btn btn-primary" data-bs-dismiss="modal">Entendido</button>
+                    <button type="button" class="btn btn-outline-primary" data-bs-dismiss="modal">Entendido</button>
                 </div>
             </div>
         </div>
@@ -3231,7 +3231,7 @@ def seleccionar_invernadero_diario():
                         </select>
                     </div>
                     <div class="d-flex justify-content-end">
-                        <button type="submit" class="btn btn-primary">
+                        <button type="submit" class="btn btn-outline-primary">
                             <i class="bi bi-file-earmark-text me-2"></i>Generar Reporte Diario
                         </button>
                     </div>
@@ -3319,6 +3319,39 @@ def generar_reporte_diario():
         hora_temp_min = horas_labels[temp_min_data.index(temp_min_dia)] if temp_min_data else "N/A"
         hora_humedad_max = horas_labels[humedad_max_data.index(humedad_max_dia)] if humedad_max_data else "N/A"
         hora_humedad_min = horas_labels[humedad_min_data.index(humedad_min_dia)] if humedad_min_data else "N/A"
+
+        # --- Lógica de Predicción de Plagas/Enfermedades para el reporte diario ---
+        riesgo_prediccion = "Bajo"
+        problemas_prediccion = []
+        posibles_plagas_prediccion = []
+
+        if temp_prom_dia > 28 and humedad_prom_dia < 40:
+            riesgo_prediccion = "Alto"
+            problemas_prediccion.append("Condiciones extremas: Alta temperatura y baja humedad")
+            posibles_plagas_prediccion.extend(["Ácaros", "Araña roja", "Trips"])
+        elif temp_prom_dia > 25 and humedad_prom_dia > 70:
+            riesgo_prediccion = "Alto"
+            problemas_prediccion.append("Condiciones favorables para hongos")
+            posibles_plagas_prediccion.extend(["Botrytis", "Mildiu", "Oídio"])
+        elif temp_prom_dia > 25:
+            riesgo_prediccion = "Moderado"
+            problemas_prediccion.append("Temperatura elevada puede favorecer plagas")
+            posibles_plagas_prediccion.extend(["Mosca blanca", "Pulgón"])
+        elif humedad_prom_dia > 80:
+            riesgo_prediccion = "Moderado" if riesgo_prediccion == "Bajo" else riesgo_prediccion
+            problemas_prediccion.append("Humedad muy alta favorece enfermedades")
+            posibles_plagas_prediccion.extend(["Rhizoctonia", "Pythium"])
+        
+        posibles_plagas_prediccion = list(set(posibles_plagas_prediccion)) # Eliminar duplicados
+        
+        if not problemas_prediccion:
+            problemas_prediccion.append("Condiciones dentro de rangos normales - riesgo mínimo")
+        
+        if not posibles_plagas_prediccion:
+            posibles_plagas_prediccion.append("Ninguna plaga específica identificada")
+
+        riesgo_color_clase = "success" if riesgo_prediccion == "Bajo" else "warning" if riesgo_prediccion == "Moderado" else "danger"
+
 
         content = f"""
         <div class="container-fluid px-4">
@@ -3457,6 +3490,45 @@ def generar_reporte_diario():
                 </div>
             </div>
             
+            <!-- Sección de Predicción de Plagas/Enfermedades para reporte diario -->
+            <div class="card shadow-sm mb-4 border-{riesgo_color_clase}">
+                <div class="card-header bg-{riesgo_color_clase} bg-opacity-10">
+                    <h5 class="mb-0"><i class="bi bi-bug me-2"></i>Predicción de Plagas/Enfermedades</h5>
+                </div>
+                <div class="card-body">
+                    <p><strong>Riesgo General:</strong> <span class="badge bg-{riesgo_color_clase}">{riesgo_prediccion}</span></p>
+                    
+                    <h6 class="mt-3"><i class="bi bi-exclamation-triangle me-2"></i>Problemas Potenciales:</h6>
+                    <ul class="mb-2">
+            """
+        for problema in problemas_prediccion:
+            content += f"""
+                        <li>{problema}</li>
+            """
+        content += """
+                    </ul>
+                    
+                    <h6 class="mt-3"><i class="bi bi-bug-fill me-2"></i>Posibles Plagas/Enfermedades:</h6>
+                    <div class="d-flex flex-wrap gap-2">
+            """
+        for plaga in posibles_plagas_prediccion:
+            content += f"""
+                        <span class="badge bg-secondary">{plaga}</span>
+            """
+        content += """
+                    </div>
+                    
+                    <div class="alert alert-info mt-4">
+                        <h5><i class="bi bi-lightbulb me-2"></i>Recomendaciones Adicionales:</h5>
+                        <ul>
+                            <li>Monitorear visualmente los cultivos diariamente.</li>
+                            <li>Ajustar sistemas de riego y ventilación según las predicciones.</li>
+                            <li>Consultar a un especialista si el riesgo es alto o persistente.</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
             <!-- Recomendaciones generales -->
             <div class="card shadow-sm mb-4 border-primary">
                 <div class="card-header bg-primary bg-opacity-10">
