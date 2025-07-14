@@ -4,6 +4,8 @@ from datetime import datetime, timedelta
 from collections import deque
 import requests
 import threading
+from decimal import Decimal
+import json
 
 app = Flask(__name__)
 app.secret_key = "tu_clave_secreta"
@@ -19,15 +21,7 @@ INVERNADEROS = {
 
 ALERT_TEMP =  30 # Umbral de temperatura para alertas
 
-DESTINATION_WHATSAPP = "593979111576"   # Número destino (sin "+" o "whatsapp:")
-
-# Variables globales para almacenar lecturas
-lecturas_sensor = []  # Lista para almacenar todas las lecturas del sensor
-asignacion_activa = None  # Almacena el ID del invernadero activo
-ultimas_lecturas = {invernadero_id: None for invernadero_id in INVERNADEROS.keys()} 
-ultimos_estados = {invernadero_id: None for invernadero_id in INVERNADEROS.keys()}  # Para seguimiento de estados
-ultimas_alertas_temp = {invernadero_id: False for invernadero_id in INVERNADEROS.keys()}
-
+DESTINATION_WHATSAPP = "593979111576"
 
 def estado_suelo(humedad):
     if humedad is None:
@@ -46,6 +40,61 @@ def get_db():
         password="admin",
         database="db_invernaderos"
     )
+
+def actualizar_invernaderos():
+    global INVERNADEROS, ultimas_lecturas, ultimos_estados, ultimas_alertas_temp
+    try:
+        conn = get_db()
+        cursor = conn.cursor(dictionary=True)
+        
+        cursor.execute("SELECT id, nombre FROM invernaderos ORDER BY id")
+        invernaderos_db = cursor.fetchall()
+        
+        # Actualizar el diccionario INVERNADEROS
+        nuevos_invernaderos = {row['id']: row['nombre'] for row in invernaderos_db}
+        
+        # Actualizar variables dependientes
+        nuevos_ids = set(nuevos_invernaderos.keys())
+        ids_actuales = set(INVERNADEROS.keys())
+        
+        # Agregar nuevos invernaderos a las variables de estado
+        for id_nuevo in nuevos_ids - ids_actuales:
+            ultimas_lecturas[id_nuevo] = None
+            ultimos_estados[id_nuevo] = None
+            ultimas_alertas_temp[id_nuevo] = False
+        
+        # Eliminar invernaderos removidos
+        for id_eliminar in ids_actuales - nuevos_ids:
+            ultimas_lecturas.pop(id_eliminar, None)
+            ultimos_estados.pop(id_eliminar, None)
+            ultimas_alertas_temp.pop(id_eliminar, None)
+        
+        INVERNADEROS = nuevos_invernaderos
+        
+    except Exception as e:
+        print(f"Error al actualizar INVERNADEROS: {str(e)}")
+        # Mantener valores por defecto si hay error
+        INVERNADEROS = {
+            1: "Invernadero de Claveles",
+            2: "Invernadero de Claveles", 
+            3: "Invernadero de Claveles",
+            4: "Invernadero de Claveles",
+            5: "Invernadero de Claveles"
+        }
+    finally:
+        if 'conn' in locals() and conn.is_connected():
+            conn.close()
+
+
+# Variables globales para almacenar lecturas
+lecturas_sensor = []  # Lista para almacenar todas las lecturas del sensor
+asignacion_activa = None  # Almacena el ID del invernadero activo
+ultimas_lecturas = {invernadero_id: None for invernadero_id in INVERNADEROS.keys()} 
+ultimos_estados = {invernadero_id: None for invernadero_id in INVERNADEROS.keys()}  # Para seguimiento de estados
+ultimas_alertas_temp = {invernadero_id: False for invernadero_id in INVERNADEROS.keys()}
+
+# Al final de las definiciones globales, antes de las rutas
+actualizar_invernaderos()
 
 
 # HTML Base
@@ -619,7 +668,7 @@ def home():
                     </div>
                 </div>
                 <div class="col-lg-5 d-none d-lg-block">
-                    <img src="https://cdn-icons-png.flaticon.com/512/3050/3050226.png" alt="Invernadero" class="img-fluid" style="max-height: 250px;">
+                    <img src="static/img/image-1.png" alt="Invernadero" class="img-fluid" style="max-height: 250px;">
                 </div>
             </div>
         </div>
@@ -688,7 +737,7 @@ def home():
                     </a>
                 </div>
                 <div class="col-md-3">
-                    <a href="#" class="card action-card h-100 text-decoration-none">
+                    <a href="/analisis-comparativo" class="card action-card h-100 text-decoration-none">
                         <div class="card-body text-center">
                             <i class="bi bi-file-earmark-bar-graph text-info mb-2" style="font-size: 2rem;"></i>
                             <h5 class="mb-1">Reportes</h5>
@@ -770,63 +819,50 @@ def home():
 # Página de listado de invernaderos
 @app.route('/invernaderos')
 def listar_invernaderos():
+    # Función para generar color único basado en ID
+    def get_color_from_id(invernadero_id):
+        # Lista de colores Bootstrap que combinan bien
+        colors = [
+            'primary', 'secondary', 'success', 'danger', 'warning', 'info',
+            'dark', 'primary', 'secondary', 'success', 'danger', 'warning'
+        ]
+        return colors[invernadero_id % len(colors)]
+
     # Obtener todos los invernaderos de la base de datos
     try:
         conn = get_db()
         cursor = conn.cursor(dictionary=True)
         
-        # Obtener la lista de todos los invernaderos
-        cursor.execute("SELECT id, nombre FROM invernaderos ORDER BY id")
+        # Obtener la lista de todos los invernaderos con sus datos completos
+        cursor.execute("""
+            SELECT i.id, i.nombre, i.cantidad_claveles, i.encargado,
+                   (SELECT temperatura FROM lecturas WHERE invernadero_id = i.id ORDER BY fecha DESC LIMIT 1) as temperatura,
+                   (SELECT humedad_suelo FROM lecturas WHERE invernadero_id = i.id ORDER BY fecha DESC LIMIT 1) as humedad,
+                   (SELECT fecha FROM lecturas WHERE invernadero_id = i.id ORDER BY fecha DESC LIMIT 1) as fecha
+            FROM invernaderos i
+            ORDER BY i.id
+        """)
+        
         invernaderos_db = cursor.fetchall()
         
         if not invernaderos_db:
             flash("No hay invernaderos registrados", "info")
             return render_template_string(BASE_HTML, title="Invernaderos", content="<div class='alert alert-info'>No hay invernaderos registrados</div>")
         
-        # Obtener últimos datos de cada invernadero
+        # Procesar los datos de cada invernadero
         ultimos_datos = {}
         for invernadero in invernaderos_db:
             invernadero_id = invernadero['id']
             
-            # Obtener datos del sensor
-            cursor.execute("""
-                SELECT temperatura, humedad_suelo as humedad, fecha
-                FROM lecturas 
-                WHERE invernadero_id = %s
-                ORDER BY fecha DESC LIMIT 1
-            """, (invernadero_id,))
-            
-            resultado = cursor.fetchone()
-            
-            # Obtener información completa del invernadero
-            cursor.execute("""
-                SELECT nombre, cantidad_claveles, encargado
-                FROM invernaderos
-                WHERE id = %s
-            """, (invernadero_id,))
-            
-            info_invernadero = cursor.fetchone()
-            
-            if resultado and info_invernadero:
-                ultimos_datos[invernadero_id] = {
-                    "nombre": info_invernadero['nombre'],
-                    "temperatura": float(resultado['temperatura']) if resultado['temperatura'] is not None else None,
-                    "humedad": int(resultado['humedad']) if resultado['humedad'] is not None else None,
-                    "fecha": resultado['fecha'].strftime('%Y-%m-%d %H:%M') if resultado['fecha'] else "Sin datos",
-                    "estado": estado_suelo(resultado['humedad']) if resultado['humedad'] is not None else "Sin datos",
-                    "cantidad_claveles": info_invernadero['cantidad_claveles'],
-                    "encargado": info_invernadero['encargado']
-                }
-            else:
-                ultimos_datos[invernadero_id] = {
-                    "nombre": invernadero['nombre'],
-                    "temperatura": None,
-                    "humedad": None,
-                    "fecha": "Sin datos",
-                    "estado": "Sin datos",
-                    "cantidad_claveles": 0,
-                    "encargado": "No asignado"
-                }
+            ultimos_datos[invernadero_id] = {
+                "nombre": invernadero['nombre'],
+                "temperatura": float(invernadero['temperatura']) if invernadero['temperatura'] is not None else None,
+                "humedad": int(invernadero['humedad']) if invernadero['humedad'] is not None else None,
+                "fecha": invernadero['fecha'].strftime('%Y-%m-%d %H:%M') if invernadero['fecha'] else "Sin datos",
+                "estado": estado_suelo(invernadero['humedad']) if invernadero['humedad'] is not None else "Sin datos",
+                "cantidad_claveles": invernadero['cantidad_claveles'] if invernadero['cantidad_claveles'] is not None else 0,
+                "encargado": invernadero['encargado'] if invernadero['encargado'] else "No asignado"
+            }
 
     except Exception as e:
         flash(f"Error al obtener datos: {str(e)}", "danger")
@@ -847,6 +883,7 @@ def listar_invernaderos():
     """.format(len(ultimos_datos))
 
     for invernadero_id, datos in ultimos_datos.items():
+        color_badge = get_color_from_id(invernadero_id)
         temp = datos.get('temperatura')
         hum = datos.get('humedad')
         
@@ -873,11 +910,11 @@ def listar_invernaderos():
               <div class="card-header bg-light">
                 <h5 class="card-title mb-0 d-flex justify-content-between">
                   <span>{nombre_invernadero}</span>
-                  <span class="badge bg-primary">ID: {invernadero_id}</span>
+                  <span class="badge bg-{color_badge}"> {invernadero_id}</span>
                 </h5>
               </div>
               <div class="card-body">
-                <h4 class="card-title text-center mb-4">Invernadero #{invernadero_id}</h4>
+                <h4 class="card-title text-center mb-4">Invernadero {invernadero_id}</h4>
                 
                 <div class="row mb-3">
                   <div class="col-md-6">
@@ -1252,98 +1289,167 @@ def gestion_invernaderos():
     
     # Generar tabla HTML
     tabla_html = """
-    <!-- Incluir CDN de Bootstrap JS (si no está en tu BASE_HTML) -->
+    <!-- Incluir CDN de Bootstrap Icons -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     
-    <div class="card shadow-sm">
-        <div class="card-header bg-white d-flex justify-content-between align-items-center">
-            <h3 class="mb-0">Gestión de Invernaderos</h3>
-            <a href="/agregar-invernadero" class="btn btn-primary">
-                <i class="bi bi-plus-circle me-2"></i>Agregar Invernadero
+    <div class="container-fluid px-4">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1 class="mt-4"></i>Gestión de Invernaderos</h1>
+            <a href="/agregar-invernadero" class="btn btn-outline-primary shadow-sm">
+                <i class="bi bi-plus-circle me-2"></i>Nuevo Invernadero
             </a>
         </div>
-        <div class="card-body">
+        
+        <div class="card shadow-sm border-0">
+            <div class="card-body p-0">
     """
     
     if not invernaderos:
         tabla_html += """
-            <div class="alert alert-info">
-                No hay invernaderos registrados. <a href="/agregar-invernadero" class="alert-link">Agregar uno nuevo</a>
-            </div>
+                <div class="text-center py-5">
+                    <i class="bi bi-building text-muted" style="font-size: 5rem;"></i>
+                    <h3 class="mt-3">No hay invernaderos registrados</h3>
+                    <p class="text-muted">Comienza agregando tu primer invernadero</p>
+                    <a href="/agregar-invernadero" class="btn btn-primary px-4">
+                        <i class="bi bi-plus-circle me-2"></i>Agregar Invernadero
+                    </a>
+                </div>
         """
     else:
         tabla_html += """
-            <div class="table-responsive">
-                <table class="table table-hover table-striped">
-                    <thead class="table-light">
-                        <tr>
-                            <th>ID</th>
-                            <th>Nombre</th>
-                            <th>Cantidad de Claveles</th>
-                            <th>Encargado</th>
-                            <th>Acciones</th>
-                        </tr>
-                    </thead>
-                    <tbody>
+                <div class="table-responsive">
+                    <table class="table table-hover align-middle">
+                        <thead class="table-light">
+                            <tr>
+                                <th style="width: 80px;">ID</th>
+                                <th>Invernadero</th>
+                                <th class="text-center">Claveles</th>
+                                <th>Encargado</th>
+                                <th class="text-center">Acciones</th>
+                            </tr>
+                        </thead>
+                        <tbody>
         """
         
         for inv in invernaderos:
             tabla_html += f"""
-                        <tr>
-                            <td>{inv['id']}</td>
-                            <td>{inv['nombre']}</td>
-                            <td>{inv['cantidad_claveles']:,}</td>
-                            <td>{inv['encargado']}</td>
-                            <td>
-                                <div class="d-flex gap-2">
-                                    <a href="/editar-invernadero/{inv['id']}" class="btn btn-sm btn-outline-primary">
-                                        <i class="bi bi-pencil-square"></i>
-                                    </a>
-                                    <button class="btn btn-sm btn-outline-danger" 
-                                            onclick="confirmarEliminacion({inv['id']})">
-                                        <i class="bi bi-trash"></i>
-                                    </button>
-                                </div>
-                            </td>
-                        </tr>
+                            <tr>
+                                <td>
+                                    <span class="badge rounded-pill bg-primary bg-opacity-10 text-primary fs-6">
+                                        {inv['id']}
+                                    </span>
+                                </td>
+                                <td>
+                                    <div class="d-flex align-items-center">
+                                        <div>
+                                            <h6 class="mb-0">{inv['nombre']}</h6>
+                                        </div>
+                                    </div>
+                                </td>
+                                <td class="text-center">
+                                    <span class="badge bg-success bg-opacity-10 text-success">
+                                        <i class="bi bi-flower1 me-1"></i>
+                                        {inv['cantidad_claveles']:,}
+                                    </span>
+                                </td>
+                                <td>
+                                    <div class="d-flex align-items-center">
+                                        <span>{inv['encargado'] or 'No asignado'}</span>
+                                    </div>
+                                </td>
+                                <td class="text-center">
+                                    <div class="d-flex justify-content-center gap-2">
+                                        <a href="/editar-invernadero/{inv['id']}" class="btn btn-sm btn-outline-secondary rounded-pill" 
+                                           data-bs-toggle="tooltip" data-bs-title="Editar">
+                                            <i class="bi bi-pencil-square"></i>
+                                        </a>
+                                        <button class="btn btn-sm btn-outline-danger rounded-pill" 
+                                                onclick="confirmarEliminacion({inv['id']}, '{inv['nombre']}')"
+                                                data-bs-toggle="tooltip" data-bs-title="Eliminar">
+                                            <i class="bi bi-trash"></i>
+                                        </button>
+                                    </div>
+                                </td>
+                            </tr>
             """
         
         tabla_html += """
-                    </tbody>
-                </table>
+                        </tbody>
+                    </table>
+                </div>
             </div>
-        """
+        </div>
+    """
     
     tabla_html += """
-        </div>
     </div>
 
     <!-- Modal de confirmación -->
-    <div class="modal fade" id="confirmModal" tabindex="-1" aria-labelledby="confirmModalLabel" aria-hidden="true">
-        <div class="modal-dialog">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title" id="confirmModalLabel">Confirmar Eliminación</h5>
+    <div class="modal fade" id="confirmModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content border-0 shadow">
+                <div class="modal-header border-0">
+                    <h5 class="modal-title text-danger"><i class="bi bi-exclamation-triangle-fill me-2"></i>Confirmar Eliminación</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
-                <div class="modal-body">
-                    ¿Estás seguro que deseas eliminar este invernadero? Esta acción no se puede deshacer.
+                <div class="modal-body py-4">
+                    <div class="d-flex flex-column align-items-center text-center">
+                        <i class="bi bi-trash-fill text-danger mb-3" style="font-size: 3rem;"></i>
+                        <h5 id="modalMessage">¿Estás seguro de eliminar este invernadero?</h5>
+                        <p class="text-muted">Esta acción no se puede deshacer.</p>
+                    </div>
                 </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
-                    <a id="deleteBtn" href="#" class="btn btn-danger">Eliminar</a>
+                <div class="modal-footer border-0 justify-content-center">
+                    <button type="button" class="btn btn-outline-secondary px-4 rounded-pill" data-bs-dismiss="modal">Cancelar</button>
+                    <a id="deleteBtn" href="#" class="btn btn-outline-danger px-4 rounded-pill">
+                        <i class="bi bi-trash-fill me-2"></i>Eliminar
+                    </a>
                 </div>
             </div>
         </div>
     </div>
 
     <script>
-        function confirmarEliminacion(id) {
-            document.getElementById('deleteBtn').href = '/eliminar-invernadero/' + id;
-            var modal = new bootstrap.Modal(document.getElementById('confirmModal'));
-            modal.show();
+        // Inicializar tooltips
+        document.addEventListener('DOMContentLoaded', function() {
+            const tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'))
+            const tooltipList = tooltipTriggerList.map(function (tooltipTriggerEl) {
+                return new bootstrap.Tooltip(tooltipTriggerEl)
+            })
+        })
+        
+        function confirmarEliminacion(id, nombre) {
+            document.getElementById('modalMessage').innerHTML = `¿Estás seguro de eliminar el invernadero <strong>${nombre}</strong>?`
+            document.getElementById('deleteBtn').href = '/eliminar-invernadero/' + id
+            const modal = new bootstrap.Modal(document.getElementById('confirmModal'))
+            modal.show()
         }
     </script>
+    
+    <style>
+        .table td, .table th {
+            vertical-align: middle;
+            padding: 12px;
+        }
+        .badge {
+            padding: 5px 10px;
+            font-weight: 500;
+        }
+        .card {
+            border-radius: 12px;
+            overflow: hidden;
+        }
+        .btn {
+            transition: all 0.2s;
+        }
+        .btn-sm {
+            padding: 0.35rem 0.75rem;
+        }
+        .rounded-pill {
+            border-radius: 50px !important;
+        }
+    </style>
     """
     
     return render_template_string(
@@ -1356,7 +1462,6 @@ def gestion_invernaderos():
 def agregar_invernadero():
     if request.method == 'POST':
         try:
-            id = request.form['id']
             nombre = request.form['nombre']
             cantidad_claveles = request.form['cantidad_claveles']
             encargado = request.form['encargado']
@@ -1364,10 +1469,11 @@ def agregar_invernadero():
             conn = get_db()
             cursor = conn.cursor()
             
+            # Consulta modificada (sin incluir el ID)
             cursor.execute("""
-                INSERT INTO invernaderos (id, nombre, cantidad_claveles, encargado)
-                VALUES (%s, %s, %s, %s)
-            """, (id, nombre, cantidad_claveles, encargado))
+                INSERT INTO invernaderos (nombre, cantidad_claveles, encargado)
+                VALUES (%s, %s, %s)
+            """, (nombre, cantidad_claveles, encargado))
             
             conn.commit()
             flash("Invernadero agregado correctamente", "success")
@@ -1381,35 +1487,70 @@ def agregar_invernadero():
     
     # Generar formulario HTML
     form_html = """
-    <div class="card shadow-sm">
-        <div class="card-header bg-white">
-            <h3 class="mb-0">Agregar Nuevo Invernadero</h3>
+    <div class="container-fluid px-4">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1 class="mt-4"></i>Agregar Invernadero</h1>
+            <a href="/gestion-invernaderos" class="btn btn-outline-secondary">
+                <i class="bi bi-arrow-left me-2"></i>Volver
+            </a>
         </div>
-        <div class="card-body">
-            <form method="POST">
-                <div class="mb-3">
-                    <label for="id" class="form-label">ID del Invernadero</label>
-                    <input type="number" class="form-control" id="id" name="id" required>
-                </div>
-                <div class="mb-3">
-                    <label for="nombre" class="form-label">Nombre</label>
-                    <input type="text" class="form-control" id="nombre" name="nombre" required>
-                </div>
-                <div class="mb-3">
-                    <label for="cantidad_claveles" class="form-label">Cantidad de Claveles</label>
-                    <input type="number" class="form-control" id="cantidad_claveles" name="cantidad_claveles" required>
-                </div>
-                <div class="mb-3">
-                    <label for="encargado" class="form-label">Encargado</label>
-                    <input type="text" class="form-control" id="encargado" name="encargado" required>
-                </div>
-                <div class="d-flex justify-content-end gap-2">
-                    <a href="/gestion-invernaderos" class="btn btn-secondary">Cancelar</a>
-                    <button type="submit" class="btn btn-primary">Guardar</button>
-                </div>
-            </form>
+        
+        <div class="card shadow-sm border-0">
+            <div class="card-body p-4">
+                <form method="POST">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <div class="form-floating mb-3">
+                                <input type="text" class="form-control" id="nombre" name="nombre" 
+                                       placeholder="Nombre del invernadero" required>
+                                <label for="nombre">Nombre del Invernadero</label>
+                            </div>
+                        </div>
+                        
+                        <div class="col-md-6">
+                            <div class="form-floating mb-3">
+                                <input type="number" class="form-control" id="cantidad_claveles" name="cantidad_claveles" 
+                                       placeholder="Cantidad de claveles" min="0" required>
+                                <label for="cantidad_claveles">Cantidad de Claveles</label>
+                            </div>
+                        </div>
+                        
+                        <div class="col-12">
+                            <div class="form-floating mb-4">
+                                <input type="text" class="form-control" id="encargado" name="encargado" 
+                                       placeholder="Nombre del encargado" required>
+                                <label for="encargado">Encargado</label>
+                            </div>
+                        </div>
+                        
+                        <div class="col-12">
+                            <div class="d-flex justify-content-end gap-3 pt-2">
+                                <a href="/gestion-invernaderos" class="btn btn-outline-secondary px-4">
+                                    <i class="bi bi-x-lg me-2"></i>Cancelar
+                                </a>
+                                <button type="submit" class="btn btn-outline-primary px-4">
+                                    <i class="bi bi-check-lg me-2"></i>Guardar Invernadero
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </form>
+            </div>
         </div>
     </div>
+    
+    <style>
+        .form-floating>label {
+            padding: 1rem 1.25rem;
+        }
+        .form-control {
+            padding: 1rem 1.25rem;
+            border-radius: 8px;
+        }
+        .form-control:focus {
+            box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.15);
+        }
+    </style>
     """
     
     return render_template_string(BASE_HTML, title="Agregar Invernadero", content=form_html)
@@ -1462,32 +1603,71 @@ def editar_invernadero(id):
     
     # Generar formulario HTML
     form_html = f"""
-    <div class="card shadow-sm">
-        <div class="card-header bg-white">
-            <h3 class="mb-0">Editar Invernadero #{invernadero['id']}</h3>
+    <div class="container-fluid px-4">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1 class="mt-4">
+                <i class="bi bi-building me-2"></i>
+                Editar Invernadero <span class="text-primary">#{invernadero['id']}</span>
+            </h1>
+            <a href="/gestion-invernaderos" class="btn btn-outline-secondary">
+                <i class="bi bi-arrow-left me-2"></i>Volver
+            </a>
         </div>
-        <div class="card-body">
-            <form method="POST">
-                <div class="mb-3">
-                    <label for="nombre" class="form-label">Nombre</label>
-                    <input type="text" class="form-control" id="nombre" name="nombre" 
-                           value="{invernadero['nombre']}" required>
+        
+        <div class="card shadow-sm border-0">
+            <div class="card-header bg-white border-0 py-3">
+                <div class="d-flex align-items-center">
+                    <div class="avatar avatar-lg me-3">
+                        <span class="avatar-initial rounded-circle bg-primary bg-opacity-10 text-primary fs-4">
+                            <i class="bi bi-building"></i>
+                        </span>
+                    </div>
+                    <div>
+                        <h5 class="mb-0">{invernadero['nombre']}</h5>
+                    </div>
                 </div>
-                <div class="mb-3">
-                    <label for="cantidad_claveles" class="form-label">Cantidad de Claveles</label>
-                    <input type="number" class="form-control" id="cantidad_claveles" name="cantidad_claveles" 
-                           value="{invernadero['cantidad_claveles']}" required>
-                </div>
-                <div class="mb-3">
-                    <label for="encargado" class="form-label">Encargado</label>
-                    <input type="text" class="form-control" id="encargado" name="encargado" 
-                           value="{invernadero['encargado']}" required>
-                </div>
-                <div class="d-flex justify-content-end gap-2">
-                    <a href="/gestion-invernaderos" class="btn btn-secondary">Cancelar</a>
-                    <button type="submit" class="btn btn-primary">Guardar Cambios</button>
-                </div>
-            </form>
+            </div>
+            
+            <div class="card-body p-4">
+                <form method="POST">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <div class="form-floating mb-3">
+                                <input type="text" class="form-control" id="nombre" name="nombre" 
+                                       value="{invernadero['nombre']}" placeholder="Nombre del invernadero" required>
+                                <label for="nombre">Nombre del Invernadero</label>
+                            </div>
+                        </div>
+                        
+                        <div class="col-md-6">
+                            <div class="form-floating mb-3">
+                                <input type="number" class="form-control" id="cantidad_claveles" name="cantidad_claveles" 
+                                       value="{invernadero['cantidad_claveles']}" placeholder="Cantidad de claveles" min="0" required>
+                                <label for="cantidad_claveles">Cantidad de Claveles</label>
+                            </div>
+                        </div>
+                        
+                        <div class="col-12">
+                            <div class="form-floating mb-4">
+                                <input type="text" class="form-control" id="encargado" name="encargado" 
+                                       value="{invernadero['encargado']}" placeholder="Nombre del encargado" required>
+                                <label for="encargado">Encargado</label>
+                            </div>
+                        </div>
+                        
+                        <div class="col-12">
+                            <div class="d-flex justify-content-end gap-3 pt-2">
+                                <a href="/gestion-invernaderos" class="btn btn-outline-secondary px-4">
+                                    <i class="bi bi-x-lg me-2"></i>Cancelar
+                                </a>
+                                <button type="submit" class="btn btn-outline-primary px-4">
+                                    <i class="bi bi-check-lg me-2"></i>Guardar Cambios
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </form>
+            </div>
         </div>
     </div>
     """
@@ -1498,11 +1678,13 @@ def editar_invernadero(id):
 def eliminar_invernadero(id):
     try:
         conn = get_db()
-        cursor = conn.cursor()
+        cursor = conn.cursor(dictionary=True)
         
-        # Verificar si el invernadero existe
-        cursor.execute("SELECT id FROM invernaderos WHERE id = %s", (id,))
-        if not cursor.fetchone():
+        # Obtener nombre del invernadero para el mensaje flash
+        cursor.execute("SELECT nombre FROM invernaderos WHERE id = %s", (id,))
+        invernadero = cursor.fetchone()
+        
+        if not invernadero:
             flash("Invernadero no encontrado", "danger")
             return redirect('/gestion-invernaderos')
         
@@ -1510,7 +1692,7 @@ def eliminar_invernadero(id):
         cursor.execute("DELETE FROM invernaderos WHERE id = %s", (id,))
         conn.commit()
         
-        flash("Invernadero eliminado correctamente", "success")
+        flash(f"Invernadero '{invernadero['nombre']}' eliminado correctamente", "success")
         
     except Exception as e:
         flash(f"Error al eliminar invernadero: {str(e)}", "danger")
@@ -1519,6 +1701,783 @@ def eliminar_invernadero(id):
             conn.close()
     
     return redirect('/gestion-invernaderos')
+
+
+@app.route('/analisis-comparativo')
+def analisis_comparativo():
+    try:
+        conn = get_db()
+        cursor = conn.cursor(dictionary=True)
+        
+        # Obtener datos históricos de todos los invernaderos
+        cursor.execute("""
+            SELECT 
+                i.id as invernadero_id,
+                i.nombre,
+                i.encargado,
+                AVG(l.temperatura) as temp_promedio,
+                AVG(l.humedad_suelo) as humedad_promedio,
+                MAX(l.temperatura) as temp_max,
+                MIN(l.temperatura) as temp_min,
+                MAX(l.humedad_suelo) as humedad_max,
+                MIN(l.humedad_suelo) as humedad_min,
+                COUNT(l.id) as total_lecturas
+            FROM invernaderos i
+            LEFT JOIN lecturas l ON i.id = l.invernadero_id
+            GROUP BY i.id
+            ORDER BY i.id
+        """)
+        estadisticas = cursor.fetchall()
+        
+        # Obtener tendencias recientes (últimas 24 horas) con manejo de NULL
+        cursor.execute("""
+            SELECT 
+                invernadero_id,
+                AVG(temperatura) as temp_reciente,
+                AVG(humedad_suelo) as humedad_reciente,
+                CASE 
+                    WHEN COUNT(*) > 0 THEN 
+                        AVG(temperatura) - (
+                            SELECT AVG(temperatura) 
+                            FROM lecturas 
+                            WHERE fecha >= DATE_SUB(NOW(), INTERVAL 48 HOUR) 
+                            AND fecha < DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                            AND invernadero_id = l.invernadero_id
+                        )
+                    ELSE NULL
+                END as temp_tendencia,
+                CASE 
+                    WHEN COUNT(*) > 0 THEN 
+                        AVG(humedad_suelo) - (
+                            SELECT AVG(humedad_suelo) 
+                            FROM lecturas 
+                            WHERE fecha >= DATE_SUB(NOW(), INTERVAL 48 HOUR) 
+                            AND fecha < DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                            AND invernadero_id = l.invernadero_id
+                        )
+                    ELSE NULL
+                END as humedad_tendencia
+            FROM lecturas l
+            WHERE fecha >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+            GROUP BY invernadero_id
+        """)
+        tendencias = {t['invernadero_id']: t for t in cursor.fetchall()}
+
+    except Exception as e:
+        flash(f"Error al obtener datos: {str(e)}", "danger")
+        return redirect('/')
+    finally:
+        if 'conn' in locals() and conn.is_connected():
+            conn.close()
+    
+    # Función para convertir Decimal a float
+    def convert_decimals(obj):
+        if isinstance(obj, Decimal):
+            return float(obj)
+        elif isinstance(obj, dict):
+            return {k: convert_decimals(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_decimals(v) for v in obj]
+        return obj
+    
+    # Procesar datos para el árbol de decisiones
+    analisis = []
+    for inv in estadisticas:
+        invernadero_id = inv['invernadero_id']
+        tendencia = tendencias.get(invernadero_id, {})
+        
+        # Convertir Decimal a float
+        inv = convert_decimals(inv)
+        tendencia = convert_decimals(tendencia)
+        
+        # Manejo seguro de valores None
+        temp_promedio = inv['temp_promedio'] if inv['temp_promedio'] is not None else None
+        humedad_promedio = inv['humedad_promedio'] if inv['humedad_promedio'] is not None else None
+        temp_tendencia = tendencia.get('temp_tendencia', None)
+        humedad_tendencia = tendencia.get('humedad_tendencia', None)
+        
+        # Reglas de decisión (Árbol de decisiones) - MEJORADAS
+        estado = "SIN DATOS"
+        recomendaciones = []
+        prioridad = 0  # 0=SIN DATOS, 1=ÓPTIMO, 2=ALERTA, 3=CRÍTICO
+
+        # Análisis de temperatura
+        if temp_promedio is not None:
+            if temp_promedio > 28:
+                estado = "CRÍTICO"
+                prioridad = 3
+                recomendaciones.append("🚨 Reducir temperatura inmediatamente")
+                recomendaciones.append("💨 Activar ventilación máxima")
+            elif temp_promedio > 25:
+                if prioridad < 2:
+                    estado = "ALERTA"
+                    prioridad = 2
+                recomendaciones.append("⚠️ Ventilar invernadero")
+            else:
+                if prioridad < 1:
+                    estado = "ÓPTIMO"
+                    prioridad = 1
+        else:
+            recomendaciones.append("❓ No hay datos de temperatura")
+
+        # Análisis de humedad
+        if humedad_promedio is not None:
+            if humedad_promedio < 30:
+                estado = "CRÍTICO"
+                prioridad = 3
+                recomendaciones.append("🚨 Aumentar riego urgentemente")
+                recomendaciones.append("💧 Revisar sistema de irrigación")
+            elif humedad_promedio < 50:
+                if prioridad < 2:
+                    estado = "ALERTA"
+                    prioridad = 2
+                recomendaciones.append("⚠️ Monitorear humedad de cerca")
+                recomendaciones.append("💧 Considerar riego adicional")
+            else:
+                if prioridad < 1:
+                    estado = "ÓPTIMO"
+                    prioridad = 1
+        else:
+            recomendaciones.append("❓ No hay datos de humedad")
+
+        # Análisis combinado (condiciones críticas)
+        if temp_promedio is not None and humedad_promedio is not None:
+            if temp_promedio > 26 and humedad_promedio < 40:
+                estado = "CRÍTICO"
+                prioridad = 3
+                recomendaciones.append("🔥 Condición crítica: Alta temperatura + Baja humedad")
+                recomendaciones.append("🏃‍♂️ Acción inmediata requerida")
+
+        # Análisis de tendencias
+        if temp_tendencia is not None:
+            if temp_tendencia > 2:
+                recomendaciones.append("📈 Temperatura subiendo rápidamente")
+                if prioridad < 2:
+                    estado = "ALERTA"
+                    prioridad = 2
+            elif temp_tendencia < -2:
+                recomendaciones.append("📉 Temperatura bajando rápidamente")
+
+        if humedad_tendencia is not None:
+            if humedad_tendencia > 2:
+                recomendaciones.append("📈 Humedad subiendo rápidamente")
+            elif humedad_tendencia < -2:
+                recomendaciones.append("📉 Humedad bajando rápidamente")
+                if prioridad < 2:
+                    estado = "ALERTA"
+                    prioridad = 2
+
+        # Recomendaciones por defecto
+        if not recomendaciones:
+            recomendaciones.append("✅ Condiciones estables - Mantener operación")
+        elif estado == "ÓPTIMO" and len(recomendaciones) == 0:
+            recomendaciones.append("✅ Condiciones óptimas - Continuar monitoreo")
+        
+        # Determinar clase CSS para el estado
+        clase_estado = "bg-secondary"  # Por defecto (sin datos)
+        if estado == "ÓPTIMO":
+            clase_estado = "bg-success"
+        elif estado == "ALERTA":
+            clase_estado = "bg-warning"
+        elif estado == "CRÍTICO":
+            clase_estado = "bg-danger"
+        
+        # Determinar iconos de tendencia (manejo de None)
+        temp_tendencia_icon = (
+            "bi-arrow-up text-danger" if temp_tendencia is not None and temp_tendencia > 0 
+            else "bi-arrow-down text-primary" if temp_tendencia is not None and temp_tendencia < 0 
+            else "bi-dash text-secondary"
+        )
+        humedad_tendencia_icon = (
+            "bi-arrow-up text-primary" if humedad_tendencia is not None and humedad_tendencia > 0 
+            else "bi-arrow-down text-danger" if humedad_tendencia is not None and humedad_tendencia < 0 
+            else "bi-dash text-secondary"
+        )
+        
+        # Formatear valores para mostrar
+        temp_promedio_display = f"{temp_promedio:.1f}°C" if temp_promedio is not None else "N/A"
+        humedad_promedio_display = f"{humedad_promedio:.1f}%" if humedad_promedio is not None else "N/A"
+        temp_min_display = f"{inv['temp_min']:.1f}°C" if inv['temp_min'] is not None else "N/A"
+        temp_max_display = f"{inv['temp_max']:.1f}°C" if inv['temp_max'] is not None else "N/A"
+        humedad_min_display = f"{inv['humedad_min']:.1f}%" if inv['humedad_min'] is not None else "N/A"
+        humedad_max_display = f"{inv['humedad_max']:.1f}%" if inv['humedad_max'] is not None else "N/A"
+        temp_tendencia_display = f"{abs(temp_tendencia):.1f}°C" if temp_tendencia is not None else "N/A"
+        humedad_tendencia_display = f"{abs(humedad_tendencia):.1f}%" if humedad_tendencia is not None else "N/A"
+        
+        analisis.append({
+            **inv,
+            **tendencia,
+            'estado': estado,
+            'recomendaciones': recomendaciones,
+            'clase_estado': clase_estado,
+            'temp_promedio_display': temp_promedio_display,
+            'humedad_promedio_display': humedad_promedio_display,
+            'temp_min_display': temp_min_display,
+            'temp_max_display': temp_max_display,
+            'humedad_min_display': humedad_min_display,
+            'humedad_max_display': humedad_max_display,
+            'temp_tendencia_display': temp_tendencia_display,
+            'humedad_tendencia_display': humedad_tendencia_display,
+            'temp_tendencia_icon': temp_tendencia_icon,
+            'humedad_tendencia_icon': humedad_tendencia_icon
+        })
+    
+    # Convertir el objeto analisis a una cadena JSON para pasar a JavaScript
+    analisis_json = json.dumps(analisis)
+
+    # Generar HTML
+    content = f"""
+    <div class="container-fluid px-4">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1 class="mt-4"><i class="bi bi-diagram-3 me-2"></i>Análisis Comparativo</h1>
+            <div class="dropdown">
+                <button class="btn btn-outline-secondary dropdown-toggle" type="button" 
+                        data-bs-toggle="dropdown" aria-expanded="false">
+                    <i class="bi bi-funnel me-2"></i>Filtrar
+                </button>
+                <ul class="dropdown-menu">
+                    <li><a class="dropdown-item" href="#">Todos los invernaderos</a></li>
+                    <li><a class="dropdown-item" href="#">Solo críticos</a></li>
+                    <li><a class="dropdown-item" href="#">Solo alertas</a></li>
+                </ul>
+            </div>
+        </div>
+        
+        <!-- Mensaje si no hay datos suficientes -->
+        {f'<div class="alert alert-info mb-4">No hay suficientes datos históricos para comparar tendencias. Se mostrarán solo los datos disponibles.</div>' 
+         if all(t.get('temp_tendencia') is None and t.get('humedad_tendencia') is None for t in tendencias.values()) 
+         else ''}
+
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+        
+        <div class="row mb-4">
+            <div class="col-md-6">
+                <div class="card shadow-sm h-100">
+                    <div class="card-header bg-white">
+                        <h5 class="mb-0"><i class="bi bi-thermometer-half me-2"></i>Distribución de Temperaturas</h5>
+                    </div>
+                    <div class="card-body">
+                        <canvas id="tempChart" height="300"></canvas>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card shadow-sm h-100">
+                    <div class="card-header bg-white">
+                        <h5 class="mb-0"><i class="bi bi-droplet me-2"></i>Distribución de Humedad</h5>
+                    </div>
+                    <div class="card-body">
+                        <canvas id="humedadChart" height="300"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="card shadow-sm mb-4">
+            <div class="card-header bg-white">
+                <h5 class="mb-0"><i class="bi bi-clipboard2-data me-2"></i>Resumen Comparativo</h5>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-hover align-middle mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Invernadero</th>
+                                <th class="text-center">Temperatura</th>
+                                <th class="text-center">Humedad</th>
+                                <th class="text-center">Tendencias</th>
+                                <th class="text-center">Estado</th>
+                                <th>Recomendaciones</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+    """
+    
+    for inv in analisis:
+        content += f"""
+                            <tr>
+                                <td>
+                                    <div class="d-flex align-items-center">
+                                        <div class="avatar avatar-sm me-3">
+                                            <span class="avatar-initial rounded-circle bg-primary bg-opacity-10 text-primary">
+                                                {inv['invernadero_id']}
+                                            </span>
+                                        </div>
+                                        <div>
+                                            <h6 class="mb-0">{inv['nombre']}</h6>
+                                            <small class="text-muted">{inv['encargado']}</small>
+                                        </div>
+                                    </div>
+                                </td>
+                                <td class="text-center">
+                                    <div class="d-flex flex-column">
+                                        <span class="fw-bold">{inv['temp_promedio_display']}</span>
+                                        <small class="text-muted">{inv['temp_min_display']}-{inv['temp_max_display']}</small>
+                                    </div>
+                                </td>
+                                <td class="text-center">
+                                    <div class="d-flex flex-column">
+                                        <span class="fw-bold">{inv['humedad_promedio_display']}</span>
+                                        <small class="text-muted">{inv['humedad_min_display']}-{inv['humedad_max_display']}</small>
+                                    </div>
+                                </td>
+                                <td class="text-center">
+                                    <div class="d-flex justify-content-center gap-3">
+                                        <div class="text-center">
+                                            <i class="bi {inv['temp_tendencia_icon']}"></i>
+                                            <small class="d-block">{inv['temp_tendencia_display']}</small>
+                                        </div>
+                                        <div class="text-center">
+                                            <i class="bi {inv['humedad_tendencia_icon']}"></i>
+                                            <small class="d-block">{inv['humedad_tendencia_display']}</small>
+                                        </div>
+                                    </div>
+                                </td>
+                                <td class="text-center">
+                                    <span class="badge {inv['clase_estado']} rounded-pill">{inv['estado']}</span>
+                                </td>
+                                <td>
+                                    <ul class="mb-0" style="padding-left: 1rem;">
+        """
+        
+        for rec in inv['recomendaciones']:
+            content += f"""
+                                        <li>{rec}</li>
+            """
+        
+        content += """
+                                    </ul>
+                                </td>
+                            </tr>
+        """
+    
+    content += f"""
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        
+        <div class="card shadow-sm">
+            <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                <h5 class="mb-0"><i class="bi bi-diagram-3 me-2"></i>Árbol de Decisiones</h5>
+                <button class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#arbolModal">
+                    <i class="bi bi-info-circle me-1"></i> Explicación
+                </button>
+            </div>
+            <div class="card-body">
+                <div class="decision-tree">
+                    <div class="node root">
+                        <div class="node-content bg-primary text-white">
+                            <i class="bi bi-question-circle me-2"></i>Condiciones del Invernadero
+                        </div>
+                        <div class="children">
+                            <div class="branch">
+                                <div class="node">
+                                    <div class="node-content bg-success text-white">
+                                        <i class="bi bi-check-circle me-2"></i>Temperatura ≤ 25°C
+                                    </div>
+                                    <div class="children">
+                                        <div class="node leaf">
+                                            <div class="node-content bg-light">
+                                                <i class="bi bi-check2-all me-2 text-success"></i>Condiciones óptimas
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="branch">
+                                <div class="node">
+                                    <div class="node-content bg-warning text-dark">
+                                        <i class="bi bi-exclamation-triangle me-2"></i>Temperatura > 25°C
+                                    </div>
+                                    <div class="children">
+                                        <div class="node">
+                                            <div class="node-content bg-light">
+                                                <i class="bi bi-droplet me-2 text-info"></i>Humedad ≥ 50%
+                                            </div>
+                                            <div class="children">
+                                                <div class="node leaf">
+                                                    <div class="node-content bg-light">
+                                                        <i class="bi bi-lightbulb me-2 text-warning"></i>Ventilar invernadero
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="node">
+                                            <div class="node-content bg-light">
+                                                <i class="bi bi-droplet me-2 text-danger"></i>Humedad < 50%
+                                            </div>
+                                            <div class="children">
+                                                <div class="node leaf">
+                                                    <div class="node-content bg-light">
+                                                        <i class="bi bi-lightbulb me-2 text-danger"></i>Aumentar riego y ventilar
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="branch">
+                                <div class="node">
+                                    <div class="node-content bg-danger text-white">
+                                        <i class="bi bi-exclamation-octagon me-2"></i>Temperatura > 28°C
+                                    </div>
+                                    <div class="children">
+                                        <div class="node leaf">
+                                            <div class="node-content bg-light">
+                                                <i class="bi bi-lightbulb me-2 text-danger"></i>Acción inmediata requerida
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal de explicación del árbol -->
+    <div class="modal fade" id="arbolModal" tabindex="-1" aria-labelledby="arbolModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-primary text-white">
+                    <h5 class="modal-title" id="arbolModalLabel">
+                        <i class="bi bi-info-circle me-2"></i>Explicación del Árbol de Decisiones
+                    </h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <h5><i class="bi bi-diagram-3 me-2"></i>¿Cómo funciona?</h5>
+                            <p>Este árbol de decisiones analiza automáticamente las condiciones de tus invernaderos basándose en:</p>
+                            <ol class="mb-4">
+                                <li><strong>Temperatura actual</strong> vs rangos óptimos</li>
+                                <li><strong>Humedad del suelo</strong> y su relación con la temperatura</li>
+                                <li><strong>Tendencias recientes</strong> para predecir problemas</li>
+                            </ol>
+                            
+                            <h5><i class="bi bi-lightbulb me-2"></i>Recomendaciones</h5>
+                            <p>Las acciones sugeridas se generan automáticamente basadas en estas reglas lógicas:</p>
+                            <ul>
+                                <li><span class="badge bg-success">ÓPTIMO</span> - Condiciones dentro de rangos normales</li>
+                                <li><span class="badge bg-warning">ALERTA</span> - Condiciones cercanas a límites críticos</li>
+                                <li><span class="badge bg-danger">CRÍTICO</span> - Requiere acción inmediata</li>
+                            </ul>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="card bg-light border-0 h-100">
+                                <div class="card-body">
+                                    <h5><i class="bi bi-thermometer-half me-2"></i>Rangos de Referencia</h5>
+                                    <div class="table-responsive">
+                                        <table class="table table-sm">
+                                            <thead>
+                                                <tr>
+                                                    <th>Parámetro</th>
+                                                    <th>Óptimo</th>
+                                                    <th>Alerta</th>
+                                                    <th>Crítico</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                <tr>
+                                                    <td>Temperatura (°C)</td>
+                                                    <td class="text-success">≤ 25</td>
+                                                    <td class="text-warning">25-28</td>
+                                                    <td class="text-danger">> 28</td>
+                                                </tr>
+                                                <tr>
+                                                    <td>Humedad (%)</td>
+                                                    <td class="text-success">≥ 50</td>
+                                                    <td class="text-warning">30-50</td>
+                                                    <td class="text-danger">< 30</td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                    <hr>
+                                    <h5><i class="bi bi-graph-up me-2"></i>Tendencias</h5>
+                                    <p>El sistema también considera cambios bruscos en los últimos valores:</p>
+                                    <ul>
+                                        <li><i class="bi bi-arrow-up text-danger me-1"></i> Aumento rápido de temperatura</li>
+                                        <li><i class="bi bi-arrow-down text-primary me-1"></i> Disminución rápida de temperatura</li>
+                                        <li><i class="bi bi-arrow-up text-primary me-1"></i> Aumento rápido de humedad</li>
+                                        <li><i class="bi bi-arrow-down text-danger me-1"></i> Disminución rápida de humedad</li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-primary" data-bs-dismiss="modal">Entendido</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+    // Datos procesados desde el servidor
+    const analisisData = JSON.parse('{analisis_json}');
+    
+    // Procesar datos para las gráficas
+    const tempData = {{
+        labels: [],
+        minTemp: [],
+        avgTemp: [],
+        maxTemp: []
+    }};
+    
+    const humedadData = {{
+        labels: [],
+        minHum: [],
+        avgHum: [],
+        maxHum: []
+    }};
+    
+    // Llenar los datos desde el análisis
+    analisisData.forEach(inv => {{
+        tempData.labels.push(`Invernadero ${{inv.invernadero_id}}`);
+        tempData.minTemp.push(inv.temp_min !== null ? inv.temp_min : null);
+        tempData.avgTemp.push(inv.temp_promedio !== null ? inv.temp_promedio : null);
+        tempData.maxTemp.push(inv.temp_max !== null ? inv.temp_max : null);
+        
+        humedadData.labels.push(`Invernadero ${{inv.invernadero_id}}`);
+        humedadData.minHum.push(inv.humedad_min !== null ? inv.humedad_min : null);
+        humedadData.avgHum.push(inv.humedad_promedio !== null ? inv.humedad_promedio : null);
+        humedadData.maxHum.push(inv.humedad_max !== null ? inv.humedad_max : null);
+    }});
+
+    // Gráfico de temperaturas
+    const tempCtx = document.getElementById('tempChart').getContext('2d');
+    const tempChart = new Chart(tempCtx, {{
+        type: 'bar',
+        data: {{
+            labels: tempData.labels,
+            datasets: [
+                {{
+                    label: 'Temp. Mínima',
+                    data: tempData.minTemp,
+                    backgroundColor: 'rgba(54, 162, 235, 0.7)',
+                    borderColor: 'rgba(54, 162, 235, 1)',
+                    borderWidth: 1
+                }},
+                {{
+                    label: 'Temp. Promedio',
+                    data: tempData.avgTemp,
+                    backgroundColor: 'rgba(255, 159, 64, 0.7)',
+                    borderColor: 'rgba(255, 159, 64, 1)',
+                    borderWidth: 1
+                }},
+                {{
+                    label: 'Temp. Máxima',
+                    data: tempData.maxTemp,
+                    backgroundColor: 'rgba(255, 99, 132, 0.7)',
+                    borderColor: 'rgba(255, 99, 132, 1)',
+                    borderWidth: 1
+                }}
+            ]
+        }},
+        options: {{
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {{
+                title: {{
+                    display: true,
+                    text: 'Comparación de Temperaturas'
+                }},
+                tooltip: {{
+                    callbacks: {{
+                        label: function(context) {{
+                            let value = context.raw;
+                            return context.dataset.label + ': ' + 
+                                (value !== null ? value.toFixed(1) + '°C' : 'N/A');
+                        }}
+                    }}
+                }}
+            }},
+            scales: {{
+                y: {{
+                    title: {{
+                        display: true,
+                        text: 'Temperatura (°C)'
+                    }},
+                    beginAtZero: false
+                }}
+            }}
+        }}
+    }});
+    
+    // Gráfico de humedad
+    const humedadCtx = document.getElementById('humedadChart').getContext('2d');
+    const humedadChart = new Chart(humedadCtx, {{
+        type: 'bar',
+        data: {{
+            labels: humedadData.labels,
+            datasets: [
+                {{
+                    label: 'Humedad Mínima',
+                    data: humedadData.minHum,
+                    backgroundColor: 'rgba(75, 192, 192, 0.7)',
+                    borderColor: 'rgba(75, 192, 192, 1)',
+                    borderWidth: 1
+                }},
+                {{
+                    label: 'Humedad Promedio',
+                    data: humedadData.avgHum,
+                    backgroundColor: 'rgba(153, 102, 255, 0.7)',
+                    borderColor: 'rgba(153, 102, 255, 1)',
+                    borderWidth: 1
+                }},
+                {{
+                    label: 'Humedad Máxima',
+                    data: humedadData.maxHum,
+                    backgroundColor: 'rgba(255, 205, 86, 0.7)',
+                    borderColor: 'rgba(255, 205, 86, 1)',
+                    borderWidth: 1
+                }}
+            ]
+        }},
+        options: {{
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {{
+                title: {{
+                    display: true,
+                    text: 'Comparación de Humedad'
+                }},
+                tooltip: {{
+                    callbacks: {{
+                        label: function(context) {{
+                            let value = context.raw;
+                            return context.dataset.label + ': ' + 
+                                (value !== null ? value.toFixed(1) + '%' : 'N/A');
+                        }}
+                    }}
+                }}
+            }},
+            scales: {{
+                y: {{
+                    title: {{
+                        display: true,
+                        text: 'Humedad (%)'
+                    }},
+                    min: 0,
+                    max: 100
+                }}
+            }}
+        }}
+    }});
+    </script>
+    
+    <style>
+        .decision-tree {{
+            font-family: Arial, sans-serif;
+            margin: 20px 0;
+        }}
+        
+        .node {{
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            position: relative;
+            margin: 0 10px;
+        }}
+        
+        .node-content {{
+            padding: 10px 15px;
+            border-radius: 5px;
+            margin-bottom: 10px;
+            text-align: center;
+            min-width: 200px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            transition: all 0.3s ease;
+        }}
+        
+        .node-content:hover {{
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+        }}
+        
+        .children {{
+            display: flex;
+            justify-content: center;
+            padding-top: 20px;
+            position: relative;
+        }}
+        
+        .branch {{
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            position: relative;
+            padding: 0 20px;
+        }}
+        
+        .branch:before {{
+            content: '';
+            position: absolute;
+            top: 0;
+            height: 20px;
+            width: 1px;
+            background-color: #ccc;
+        }}
+        
+        .leaf .node-content {{
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+        }}
+        
+        .node.root {{
+            margin-top: 0;
+        }}
+        
+        .node.root .node-content {{
+            font-weight: bold;
+            font-size: 1.1em;
+        }}
+        
+        /* Animaciones para el árbol */
+        @keyframes fadeIn {{
+            from {{ opacity: 0; transform: translateY(10px); }}
+            to {{ opacity: 1; transform: translateY(0); }}
+        }}
+        
+        .node {{
+            animation: fadeIn 0.5s ease-out;
+        }}
+        
+        /* Estilos para el modal */
+        .modal-header {{
+            border-bottom: none;
+            padding-bottom: 0;
+        }}
+        
+        .modal-body h5 {{
+            color: #0d6efd;
+            margin-top: 1rem;
+        }}
+        
+        .modal-body ul, .modal-body ol {{
+            padding-left: 1.5rem;
+        }}
+        
+        .modal-body li {{
+            margin-bottom: 0.5rem;
+        }}
+        
+        .table-sm th, .table-sm td {{
+            padding: 0.5rem;
+        }}
+    </style>
+    """
+    
+    return render_template_string(BASE_HTML, title="Análisis Comparativo", content=content)
 
 def enviar_alerta_whatsapp(mensaje):
     def enviar():
