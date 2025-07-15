@@ -13,7 +13,7 @@ app.secret_key = "tu_clave_secreta_muy_segura"
 
 INVERNADEROS = {} 
 ALERT_TEMP = 25 
-DESTINATION_WHATSAPP = "593979111576"
+DESTINATION_WHATSAPP = "593983388182"
 
 
 USUARIOS = {
@@ -792,6 +792,15 @@ def home():
                             </div>
                             <div class="carousel-item">
                                 <img src="static/img/image-2.png" class="d-block w-100" alt="Imagen 4" style="max-height: 250px; object-fit: cover;">
+                            </div>
+                            <div class="carousel-item">
+                                <img src="static/img/image-3.png" class="d-block w-100" alt="Imagen 5" style="max-height: 250px; object-fit: cover;">
+                            </div>
+                            <div class="carousel-item">
+                                <img src="static/img/image-4.png" class="d-block w-100" alt="Imagen 6" style="max-height: 250px; object-fit: cover;">
+                            </div>
+                            <div class="carousel-item">
+                                <img src="static/img/image-5.png" class="d-block w-100" alt="Imagen 7" style="max-height: 250px; object-fit: cover;">
                             </div>
                         </div>
                         <!-- Controles opcionales -->
