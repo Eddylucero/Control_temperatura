@@ -29,17 +29,15 @@ def estado_suelo(humedad):
         return "Seco"
     else:
         return "Húmedo"
-
 def get_db():
     """Establece y retorna una conexión a la base de datos MySQL."""
     return mysql.connector.connect(
-        host="172.18.0.2",
+        host="MYSQLPHP",  # 👈 nombre del contenedor en lugar de IP
         port=3306,
         user="root",
         password="admin",
         database="db_invernadero"
     )
-
 def actualizar_invernaderos():
     """
     Actualiza la lista global de invernaderos desde la base de datos
