@@ -33,7 +33,8 @@ def estado_suelo(humedad):
 def get_db():
     """Establece y retorna una conexión a la base de datos MySQL."""
     return mysql.connector.connect(
-        host="localhost",
+        host="172.18.0.2",
+        port=3306,
         user="root",
         password="admin",
         database="db_invernadero"
