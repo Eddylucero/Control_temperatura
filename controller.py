@@ -6,6 +6,7 @@ from collections import deque
 import requests
 import threading
 from decimal import Decimal
+import pytz
 
 # --- Configuración y Variables Globales ---
 app = Flask(__name__)
@@ -778,7 +779,7 @@ def recibir_lectura():
         return jsonify({"error": "Datos incompletos"}), 400
 
     nueva_lectura = {
-        'fecha': datetime.now(),
+        'fecha': datetime.now(pytz.timezone("America/Guayaquil")),
         'temperatura': float(data['temperatura']),
         'humedad': int(data['humedad_suelo'])
     }
@@ -3910,8 +3911,8 @@ def enviar_alerta_whatsapp(mensaje):
     """Envía un mensaje de alerta a través de WhatsApp de forma asíncrona."""
     def enviar():
         try:
-            instance_id = "instance130350" # Reemplaza con tu ID de instancia de UltraMsg
-            token = "2gy4bgmwpj4a7uy7" # Reemplaza con tu token de UltraMsg
+            instance_id = "instance130350"
+            token = "2gy4bgmwpj4a7uy754ggg"
             to = DESTINATION_WHATSAPP
 
             mensaje_codificado = requests.utils.quote(mensaje)
