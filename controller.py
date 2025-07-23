@@ -787,11 +787,10 @@ BASE_HTML = """
 @app.route('/api/lectura', methods=['POST'])
 def recibir_lectura():
     """
-    Endpoint para recibir lecturas de sensores.
-    Almacena la lectura en memoria para actualización en tiempo real
-    y la procesa para posible guardado en DB y alertas.
+    Recibe lecturas y almacena en memoria para tiempo real.
+    Guarda en DB solo cada 12 lecturas.
     """
-    global ultimas_lecturas, reading_counts, asignacion_activa
+    global ultimas_lecturas, reading_counts
 
     data = request.get_json()
     print("Datos recibidos del sensor:", data)
@@ -807,20 +806,35 @@ def recibir_lectura():
         'humedad': int(data['humedad_suelo'])
     }
 
-    # Actualizar la última lectura en memoria para este invernadero
+    # ✅ 1) Actualiza lectura en memoria para tiempo real
     ultimas_lecturas[invernadero_id] = nueva_lectura
 
-    # Incrementar el contador de lecturas para este invernadero
+    # ✅ 2) Incrementa contador
     reading_counts[invernadero_id] = reading_counts.get(invernadero_id, 0) + 1
 
-    # Procesar la lectura para posible guardado en DB y alertas
-    sweet_alert_info = asignar_lectura_automatica(invernadero_id, nueva_lectura)
-    
-    # Si la asignación activa coincide con el invernadero que envió la lectura,
-    # enviar la información de SweetAlert2 en la respuesta.
-    if asignacion_activa == invernadero_id:
-        return jsonify({"status": "success", "sweet_alert": sweet_alert_info}), 200
-    
+    # ✅ 3) Si llega a 12, guarda en DB y reinicia contador
+    if reading_counts[invernadero_id] >= 12:
+        try:
+            conn = get_db()
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO lecturas (invernadero_id, temperatura, humedad_suelo, fecha)
+                VALUES (%s, %s, %s, %s)
+            """, (
+                invernadero_id,
+                nueva_lectura['temperatura'],
+                nueva_lectura['humedad'],
+                nueva_lectura['fecha']
+            ))
+            conn.commit()
+            print(f"Lectura guardada en DB para invernadero {invernadero_id}")
+        except Exception as e:
+            print(f"Error al guardar lectura en DB: {str(e)}")
+        finally:
+            if 'conn' in locals() and conn.is_connected():
+                conn.close()
+        reading_counts[invernadero_id] = 0  # Reinicia contador
+
     return jsonify({"status": "success"}), 200
 
 
