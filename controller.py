@@ -1,4 +1,3 @@
-
 import json
 from flask import Flask, request, jsonify, render_template_string, flash, redirect, url_for, session
 import mysql.connector
@@ -21,6 +20,10 @@ USUARIOS = {
     "admin": "12345", 
     "usuario": "pass456"
 }
+
+# Diccionario para almacenar la última vez que se guardó una lectura por invernadero
+# Esto es para controlar el intervalo de 2 minutos para guardar en la DB
+last_db_save_time = {}
 
 def estado_suelo(humedad):
     """Determina el estado del suelo basado en el porcentaje de humedad."""
@@ -104,6 +107,8 @@ BASE_HTML = """
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
+  <!-- SweetAlert2 CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
   <style>
     /* Estilos generales para la visualización en pantalla */
     body {
@@ -534,6 +539,25 @@ BASE_HTML = """
       }
     }
 
+    // *** NUEVA FUNCIÓN: Mostrar alerta con SweetAlert2 ***
+    function mostrarAlertaSweet(tipo, titulo, mensaje) {
+        let icon = 'info';
+        if (tipo === 'temperatura_alta') {
+            icon = 'warning';
+        } else if (tipo === 'suelo_seco') {
+            icon = 'error';
+        }
+
+        Swal.fire({
+            icon: icon,
+            title: titulo,
+            text: mensaje,
+            confirmButtonText: 'Entendido',
+            timer: 5000, // La alerta se cierra automáticamente después de 5 segundos
+            timerProgressBar: true
+        });
+    }
+
     // Función para cargar datos iniciales del historial
     async function cargarHistorialInicial() {
         try {
@@ -581,6 +605,12 @@ BASE_HTML = """
                 actualizarTabla(data);
                 actualizarGraficos(data);
                 actualizarEstado(true);
+
+                // *** NUEVO: Mostrar SweetAlert2 si hay una alerta ***
+                if (data.sweet_alert) {
+                    mostrarAlertaSweet(data.sweet_alert.tipo, data.sweet_alert.titulo, data.sweet_alert.mensaje);
+                }
+
             }
 
             // Sincronizar con historial completo periódicamente
@@ -756,9 +786,13 @@ def recibir_lectura():
     lecturas_sensor.append(nueva_lectura)
 
     if asignacion_activa:
-        asignar_lectura_automatica(asignacion_activa, nueva_lectura)
-
+        # Aquí llamamos a la función que procesa la lectura y decide si guardar en DB
+        # y si generar alertas (incluyendo SweetAlert2)
+        sweet_alert_info = asignar_lectura_automatica(asignacion_activa, nueva_lectura)
+        return jsonify({"status": "success", "sweet_alert": sweet_alert_info}), 200
+    
     return jsonify({"status": "success"}), 200
+
 
 @app.route('/api/lecturas_historial/<int:invernadero_id>')
 def lecturas_historial(invernadero_id):
@@ -1467,12 +1501,21 @@ def lecturas_realtime(invernadero_id):
                 'temperatura': float(resultado['temperatura']),
                 'humedad': int(resultado['humedad'])
             }
+            
+            # Obtener el sweet_alert_info que pudo haberse generado al guardar la lectura
+            # Si no se generó uno, será None
+            sweet_alert_info = last_db_save_time.get(f"sweet_alert_{invernadero_id}", None)
+            # Limpiar la alerta después de enviarla al frontend
+            if sweet_alert_info:
+                last_db_save_time[f"sweet_alert_{invernadero_id}"] = None
+
 
             return jsonify({
                 'fecha': resultado['fecha'].strftime('%Y-%m-%d %H:%M'),
                 'temperatura': float(resultado['temperatura']),
                 'humedad': int(resultado['humedad']),
-                'estado': estado_suelo(resultado['humedad'])
+                'estado': estado_suelo(resultado['humedad']),
+                'sweet_alert': sweet_alert_info # Incluir la información de SweetAlert2
             })
         else:
             return jsonify({'error': 'No hay datos disponibles para este invernadero'}), 404
@@ -2411,7 +2454,7 @@ def analisis_comparativo():
 
         <div class="card shadow-sm mb-4">
             <div class="card-header bg-white">
-                <h5 class="mb-0"><i class="bi bi-clipboard2-data me-2"></i>Resumen Comparativo</h5>
+                <h5 class="mb-0"><i class="bi bi-clipboard2-data me-2"></i>Resumen Comparativo nacionales</h6>
             </div>
             <div class="card-body p-0">
                 <div class="table-responsive">
@@ -3055,7 +3098,7 @@ def generar_reporte():
 
             <div class="card shadow-sm mb-4">
                 <div class="card-header bg-white">
-                    <h5 class="mb-0"><i class="bi bi-info-circle me-2"></i>Parámetros del Reporte</h5>
+                    <h5 class="mb-0"><i class="bi bi-info-circle me-2"></i>Parámetros del Reporte</h6>
                 </div>
                 <div class="card-body">
                     <div class="row">
@@ -3076,7 +3119,7 @@ def generar_reporte():
                 <div class="col-md-6">
                     <div class="card shadow-sm h-100">
                         <div class="card-header bg-white">
-                            <h5 class="mb-0"><i class="bi bi-thermometer-half me-2"></i>Evolución de Temperatura</h5>
+                            <h5 class="mb-0"><i class="bi bi-thermometer-half me-2"></i>Evolución de Temperatura</h6>
                         </div>
                         <div class="card-body">
                             <canvas id="tempChart" height="200"></canvas>
@@ -3086,7 +3129,7 @@ def generar_reporte():
                 <div class="col-md-6">
                     <div class="card shadow-sm h-100">
                         <div class="card-header bg-white">
-                            <h5 class="mb-0"><i class="bi bi-droplet me-2"></i>Evolución de Humedad</h5>
+                            <h5 class="mb-0"><i class="bi bi-droplet me-2"></i>Evolución de Humedad</h6>
                         </div>
                         <div class="card-body">
                             <canvas id="humedadChart" height="200"></canvas>
@@ -3098,7 +3141,7 @@ def generar_reporte():
             <!-- Resumen estadístico -->
             <div class="card shadow-sm mb-4">
                 <div class="card-header bg-white">
-                    <h5 class="mb-0"><i class="bi bi-clipboard-data me-2"></i>Resumen Estadístico</h5>
+                    <h5 class="mb-0"><i class="bi bi-clipboard-data me-2"></i>Resumen Estadístico</h6>
                 </div>
                 <div class="card-body">
                     <div class="table-responsive">
@@ -3149,7 +3192,7 @@ def generar_reporte():
             content += """
             <div class="card shadow-sm mb-4">
                 <div class="card-header bg-white">
-                    <h5 class="mb-0"><i class="bi bi-bug me-2"></i>Predicción de Plagas/Enfermedades</h5>
+                    <h5 class="mb-0"><i class="bi bi-bug me-2"></i>Predicción de Plagas/Enfermedades</h6>
                 </div>
                 <div class="card-body">
                     <div class="row">
@@ -3207,7 +3250,7 @@ def generar_reporte():
                     </div>
 
                     <div class="alert alert-info mt-3">
-                        <h5><i class="bi bi-lightbulb me-2"></i>Recomendaciones Generales</h5>
+                        <h5><i class="bi bi-lightbulb me-2"></i>Recomendaciones Generales</h6>
                         <ul class="mb-0">
                             <li>Monitorear regularmente los cultivos para detección temprana de plagas</li>
                             <li>Mantener un registro de las condiciones ambientales y aparición de plagas</li>
@@ -3567,7 +3610,7 @@ def generar_reporte_diario():
 
             <div class="card shadow-sm mb-4">
                 <div class="card-header bg-white">
-                    <h5 class="mb-0"><i class="bi bi-info-circle me-2"></i>Parámetros del Reporte</h5>
+                    <h5 class="mb-0"><i class="bi bi-info-circle me-2"></i>Parámetros del Reporte</h6>
                 </div>
                 <div class="card-body">
                     <div class="row">
@@ -3587,7 +3630,7 @@ def generar_reporte_diario():
                 <div class="col-md-6">
                     <div class="card shadow-sm h-100">
                         <div class="card-header bg-white">
-                            <h5 class="mb-0"><i class="bi bi-thermometer-half me-2"></i>Temperatura por Intervalo de 10 Minutos</h5>
+                            <h5 class="mb-0"><i class="bi bi-thermometer-half me-2"></i>Temperatura por Intervalo de 10 Minutos</h6>
                         </div>
                         <div class="card-body">
                             <canvas id="tempChart" height="200"></canvas>
@@ -3597,7 +3640,7 @@ def generar_reporte_diario():
                 <div class="col-md-6">
                     <div class="card shadow-sm h-100">
                         <div class="card-header bg-white">
-                            <h5 class="mb-0"><i class="bi bi-droplet me-2"></i>Humedad por Intervalo de 10 Minutos</h5>
+                            <h5 class="mb-0"><i class="bi bi-droplet me-2"></i>Humedad por Intervalo de 10 Minutos</h6>
                         </div>
                         <div class="card-body">
                             <canvas id="humedadChart" height="200"></canvas>
@@ -3609,12 +3652,12 @@ def generar_reporte_diario():
             <!-- Resumen estadístico por invernadero -->
             <div class="card shadow-sm mb-4">
                 <div class="card-header bg-white">
-                    <h5 class="mb-0"><i class="bi bi-clipboard-data me-2"></i>Resumen Diario</h5>
+                    <h5 class="mb-0"><i class="bi bi-clipboard-data me-2"></i>Resumen Diario</h6>
                 </div>
                 <div class="card-body">
                     <div class="row">
                         <div class="col-md-6">
-                            <h5><i class="bi bi-thermometer-half me-2"></i>Temperatura</h5>
+                            <h5><i class="bi bi-thermometer-half me-2"></i>Temperatura</h6>
                             <ul class="list-group mb-3">
                                 <li class="list-group-item d-flex justify-content-between align-items-center">
                                     Promedio
@@ -3631,7 +3674,7 @@ def generar_reporte_diario():
                             </ul>
                         </div>
                         <div class="col-md-6">
-                            <h5><i class="bi bi-droplet me-2"></i>Humedad</h5>
+                            <h5><i class="bi bi-droplet me-2"></i>Humedad</h6>
                             <ul class="list-group mb-3">
                                 <li class="list-group-item d-flex justify-content-between align-items-center">
                                     Promedio
@@ -3650,7 +3693,7 @@ def generar_reporte_diario():
                     </div>
 
                     <div class="mt-3">
-                        <h5><i class="bi bi-graph-up me-2"></i>Variación por Intervalo de 10 Minutos</h5>
+                        <h5><i class="bi bi-graph-up me-2"></i>Variación por Intervalo de 10 Minutos</h6>
                         <div class="table-responsive">
                             <table class="table table-sm table-bordered">
                                 <thead class="table-light">
@@ -3691,7 +3734,7 @@ def generar_reporte_diario():
             <!-- Sección de Predicción de Plagas/Enfermedades para reporte diario -->
             <div class="card shadow-sm mb-4 border-{riesgo_color_clase}">
                 <div class="card-header bg-{riesgo_color_clase} bg-opacity-10">
-                    <h5 class="mb-0"><i class="bi bi-bug me-2"></i>Predicción de Plagas/Enfermedades</h5>
+                    <h5 class="mb-0"><i class="bi bi-bug me-2"></i>Predicción de Plagas/Enfermedades</h6>
                 </div>
                 <div class="card-body">
                     <p><strong>Riesgo General:</strong> <span class="badge bg-{riesgo_color_clase}">{riesgo_prediccion}</span></p>
@@ -3717,7 +3760,7 @@ def generar_reporte_diario():
                     </div>
 
                     <div class="alert alert-info mt-4">
-                        <h5><i class="bi bi-lightbulb me-2"></i>Recomendaciones Adicionales:</h5>
+                        <h5><i class="bi bi-lightbulb me-2"></i>Recomendaciones Adicionales:</h6>
                         <ul>
                             <li>Monitorear visualmente los cultivos diariamente.</li>
                             <li>Ajustar sistemas de riego y ventilación según las predicciones.</li>
@@ -3730,7 +3773,7 @@ def generar_reporte_diario():
             <!-- Recomendaciones generales -->
             <div class="card shadow-sm mb-4 border-primary">
                 <div class="card-header bg-primary bg-opacity-10">
-                    <h5 class="mb-0"><i class="bi bi-lightbulb me-2"></i>Recomendaciones Generales</h5>
+                    <h5 class="mb-0"><i class="bi bi-lightbulb me-2"></i>Recomendaciones Generales</h6>
                 </div>
                 <div class="card-body">
                     <div class="row">
@@ -3892,17 +3935,27 @@ def asignar_lectura_automatica(invernadero_id, lectura):
     """
     Guarda una lectura en la base de datos para un invernadero específico
     y genera alertas si las condiciones son críticas.
+    Retorna información para SweetAlert2 si se genera una alerta.
     """
-    global ultimas_alertas_temp
+    global ultimas_alertas_temp, last_db_save_time
+    sweet_alert_info = None # Variable para almacenar la información de la alerta para SweetAlert2
 
     try:
         conn = get_db()
         cursor = conn.cursor()
 
-        cursor.execute("""
-            INSERT INTO lecturas (invernadero_id, temperatura, humedad_suelo, fecha)
-            VALUES (%s, %s, %s, %s)
-        """, (invernadero_id, lectura['temperatura'], lectura['humedad'], lectura['fecha']))
+        current_time = datetime.now()
+        # Verificar si han pasado 2 minutos desde la última vez que se guardó para este invernadero
+        if invernadero_id not in last_db_save_time or \
+           (current_time - last_db_save_time[invernadero_id]).total_seconds() >= 120: # 120 segundos = 2 minutos
+            
+            cursor.execute("""
+                INSERT INTO lecturas (invernadero_id, temperatura, humedad_suelo, fecha)
+                VALUES (%s, %s, %s, %s)
+            """, (invernadero_id, lectura['temperatura'], lectura['humedad'], lectura['fecha']))
+            conn.commit()
+            last_db_save_time[invernadero_id] = current_time # Actualizar el tiempo de última guardada
+            print(f"Lectura guardada en DB para invernadero {invernadero_id} en {current_time}")
 
         # Lógica de alerta por temperatura
         if lectura['temperatura'] > ALERT_TEMP:
@@ -3914,6 +3967,7 @@ def asignar_lectura_automatica(invernadero_id, lectura):
                     INSERT INTO alertas (invernadero_id, tipo, descripcion, fecha)
                     VALUES (%s, %s, %s, %s)
                 """, (invernadero_id, "TEMP_ALTA", mensaje_temp, lectura['fecha']))
+                conn.commit() # Confirmar la inserción de la alerta
 
                 mensaje_whatsapp = f"""🌡️ *ALERTA DEL INVERNADERO NÚMERO {invernadero_id}*
 *Invernadero*: {nombre_invernadero}
@@ -3923,6 +3977,11 @@ def asignar_lectura_automatica(invernadero_id, lectura):
                 enviar_alerta_whatsapp(mensaje_whatsapp)
 
                 ultimas_alertas_temp[invernadero_id] = True
+                sweet_alert_info = {
+                    "tipo": "temperatura_alta",
+                    "titulo": f"¡Alerta de Temperatura en {nombre_invernadero}!",
+                    "mensaje": f"La temperatura ha subido a {lectura['temperatura']}°C. ¡Actúa ahora!"
+                }
         else:
             ultimas_alertas_temp[invernadero_id] = False
 
@@ -3938,6 +3997,7 @@ def asignar_lectura_automatica(invernadero_id, lectura):
                 INSERT INTO alertas (invernadero_id, tipo, descripcion, fecha)
                 VALUES (%s, %s, %s, %s)
             """, (invernadero_id, "SUELO_SECO", mensaje_suelo_db, lectura['fecha']))
+            conn.commit() # Confirmar la inserción de la alerta
 
             if estado_actual == "Seco":
                 mensaje_suelo_whatsapp = f"""💧 *ALERTA DEL INVERNADERO NÚMERO {invernadero_id}*
@@ -3946,15 +4006,31 @@ def asignar_lectura_automatica(invernadero_id, lectura):
 *Descripción*: {mensaje_suelo_db}
 *Fecha*: {lectura['fecha'].strftime('%Y-%m-%d %H:%M:%S')}"""
                 enviar_alerta_whatsapp(mensaje_suelo_whatsapp)
+                
+                # Si ya se generó una alerta de temperatura, no sobrescribir, sino agregar
+                if sweet_alert_info:
+                    sweet_alert_info['mensaje'] += f"\nAdemás, se ha detectado suelo seco: {lectura['humedad']}%."
+                    sweet_alert_info['tipo'] = 'multi_alerta' # Tipo genérico para múltiples alertas
+                    sweet_alert_info['titulo'] = f"¡Múltiples Alertas en {nombre_invernadero}!"
+                else:
+                    sweet_alert_info = {
+                        "tipo": "suelo_seco",
+                        "titulo": f"¡Alerta de Suelo Seco en {nombre_invernadero}!",
+                        "mensaje": f"La humedad del suelo ha bajado a {lectura['humedad']}%. ¡Se necesita riego!"
+                    }
 
         ultimos_estados[invernadero_id] = estado_actual
-        conn.commit()
+        
+        # Almacenar la información de SweetAlert2 para que sea recogida por lecturas_realtime
+        last_db_save_time[f"sweet_alert_{invernadero_id}"] = sweet_alert_info
 
     except Exception as e:
         print(f"Error al guardar lectura automática: {str(e)}")
     finally:
         if 'conn' in locals() and conn.is_connected():
             conn.close()
+    
+    return sweet_alert_info
 
 
 if __name__ == '__main__':
