@@ -26,6 +26,19 @@ USUARIOS = {
 # Esto es para controlar el intervalo de 2 minutos para guardar en la DB
 last_db_save_time = {}
 
+# Diccionario para almacenar la última lectura recibida en memoria para cada invernadero
+# Esto es para las actualizaciones en tiempo real del frontend
+ultimas_lecturas = {}
+
+# Diccionario para contar las lecturas recibidas en memoria antes de guardar en DB
+reading_counts = {}
+
+# Diccionario para evitar alertas repetidas de temperatura
+ultimas_alertas_temp = {}
+
+# Diccionario para almacenar el último estado del suelo para detectar cambios y alertar
+ultimos_estados = {}
+
 def estado_suelo(humedad):
     """Determina el estado del suelo basado en el porcentaje de humedad."""
     if humedad is None:
@@ -50,7 +63,7 @@ def actualizar_invernaderos():
     Actualiza la lista global de invernaderos desde la base de datos
     y sincroniza las estructuras de datos asociadas.
     """
-    global INVERNADEROS, ultimas_lecturas, ultimos_estados, ultimas_alertas_temp
+    global INVERNADEROS, ultimas_lecturas, ultimos_estados, ultimas_alertas_temp, reading_counts
     try:
         conn = get_db()
         cursor = conn.cursor(dictionary=True)
@@ -68,12 +81,14 @@ def actualizar_invernaderos():
             ultimas_lecturas[id_nuevo] = None
             ultimos_estados[id_nuevo] = None
             ultimas_alertas_temp[id_nuevo] = False
+            reading_counts[id_nuevo] = 0 # Inicializar contador de lecturas
 
         # Eliminar invernaderos que ya no existen en la DB
         for id_eliminar in ids_actuales - nuevos_ids:
             ultimas_lecturas.pop(id_eliminar, None)
             ultimos_estados.pop(id_eliminar, None)
             ultimas_alertas_temp.pop(id_eliminar, None)
+            reading_counts.pop(id_eliminar, None)
 
         INVERNADEROS = nuevos_invernaderos
 
@@ -86,15 +101,13 @@ def actualizar_invernaderos():
         ultimas_lecturas = {}
         ultimos_estados = {}
         ultimas_alertas_temp = {}
+        reading_counts = {}
     finally:
         if 'conn' in locals() and conn.is_connected():
             conn.close()
 
-lecturas_sensor = []
+# Variable para la asignación activa (no se usa directamente para lecturas, sino para saber qué invernadero está en detalle)
 asignacion_activa = None
-ultimas_lecturas = {}
-ultimos_estados = {}
-ultimas_alertas_temp = {}
 
 # Inicializar los invernaderos al iniciar la aplicación
 actualizar_invernaderos()
@@ -775,15 +788,18 @@ BASE_HTML = """
 def recibir_lectura():
     """
     Endpoint para recibir lecturas de sensores.
-    Guarda la lectura y, si hay una asignación activa, la procesa.
+    Almacena la lectura en memoria para actualización en tiempo real
+    y la procesa para posible guardado en DB y alertas.
     """
-    global lecturas_sensor
+    global ultimas_lecturas, reading_counts, asignacion_activa
 
     data = request.get_json()
     print("Datos recibidos del sensor:", data)
 
-    if not all(k in data for k in ['temperatura', 'humedad_suelo']):
-        return jsonify({"error": "Datos incompletos"}), 400
+    if not all(k in data for k in ['temperatura', 'humedad_suelo', 'invernadero_id']):
+        return jsonify({"error": "Datos incompletos o falta invernadero_id"}), 400
+
+    invernadero_id = int(data['invernadero_id'])
 
     nueva_lectura = {
         'fecha': datetime.now(pytz.timezone("America/Guayaquil")),
@@ -791,12 +807,18 @@ def recibir_lectura():
         'humedad': int(data['humedad_suelo'])
     }
 
-    lecturas_sensor.append(nueva_lectura)
+    # Actualizar la última lectura en memoria para este invernadero
+    ultimas_lecturas[invernadero_id] = nueva_lectura
 
-    if asignacion_activa:
-        # Aquí llamamos a la función que procesa la lectura y decide si guardar en DB
-        # y si generar alertas (incluyendo SweetAlert2)
-        sweet_alert_info = asignar_lectura_automatica(asignacion_activa, nueva_lectura)
+    # Incrementar el contador de lecturas para este invernadero
+    reading_counts[invernadero_id] = reading_counts.get(invernadero_id, 0) + 1
+
+    # Procesar la lectura para posible guardado en DB y alertas
+    sweet_alert_info = asignar_lectura_automatica(invernadero_id, nueva_lectura)
+    
+    # Si la asignación activa coincide con el invernadero que envió la lectura,
+    # enviar la información de SweetAlert2 en la respuesta.
+    if asignacion_activa == invernadero_id:
         return jsonify({"status": "success", "sweet_alert": sweet_alert_info}), 200
     
     return jsonify({"status": "success"}), 200
@@ -842,34 +864,47 @@ def estado_invernadero(invernadero_id):
     Retorna la última lectura y el estado actual de un invernadero.
     Utilizado para actualizar el listado de invernaderos en tiempo real.
     """
-    try:
-        conn = get_db()
-        cursor = conn.cursor(dictionary=True)
+    # Obtener la última lectura de la memoria, no de la DB, para actualización rápida
+    ultima_lectura_memoria = ultimas_lecturas.get(invernadero_id)
 
-        cursor.execute("""
-            SELECT temperatura, humedad_suelo as humedad, fecha
-            FROM lecturas
-            WHERE invernadero_id = %s
-            ORDER BY fecha DESC LIMIT 1
-        """, (invernadero_id,))
+    if ultima_lectura_memoria:
+        return jsonify({
+            'temperatura': float(ultima_lectura_memoria['temperatura']),
+            'humedad': int(ultima_lectura_memoria['humedad']),
+            'fecha': ultima_lectura_memoria['fecha'].strftime('%Y-%m-%d %H:%M'),
+            'estado': estado_suelo(ultima_lectura_memoria['humedad']),
+            'alerta_temp': ultima_lectura_memoria['temperatura'] > ALERT_TEMP
+        })
+    else:
+        # Si no hay datos en memoria, intentar obtener de la DB (para el caso de recarga inicial)
+        try:
+            conn = get_db()
+            cursor = conn.cursor(dictionary=True)
 
-        resultado = cursor.fetchone()
-        if resultado:
-            return jsonify({
-                'temperatura': float(resultado['temperatura']),
-                'humedad': int(resultado['humedad']),
-                'fecha': resultado['fecha'].strftime('%Y-%m-%d %H:%M'),
-                'estado': estado_suelo(resultado['humedad']),
-                'alerta_temp': resultado['temperatura'] > ALERT_TEMP
-            })
-        else:
-            return jsonify({'error': 'No hay datos para este invernadero'}), 404
+            cursor.execute("""
+                SELECT temperatura, humedad_suelo as humedad, fecha
+                FROM lecturas
+                WHERE invernadero_id = %s
+                ORDER BY fecha DESC LIMIT 1
+            """, (invernadero_id,))
 
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-    finally:
-        if 'conn' in locals() and conn.is_connected():
-            conn.close()
+            resultado = cursor.fetchone()
+            if resultado:
+                return jsonify({
+                    'temperatura': float(resultado['temperatura']),
+                    'humedad': int(resultado['humedad']),
+                    'fecha': resultado['fecha'].strftime('%Y-%m-%d %H:%M'),
+                    'estado': estado_suelo(resultado['humedad']),
+                    'alerta_temp': resultado['temperatura'] > ALERT_TEMP
+                })
+            else:
+                return jsonify({'error': 'No hay datos para este invernadero'}), 404
+
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+        finally:
+            if 'conn' in locals() and conn.is_connected():
+                conn.close()
 
 @app.route('/')
 def home():
@@ -1175,18 +1210,31 @@ def listar_invernaderos():
             flash("No hay invernaderos registrados", "info")
             return render_template_string(BASE_HTML, title="Invernaderos", content="<div class='alert alert-info'>No hay invernaderos registrados</div>")
 
-        ultimos_datos = {}
-        for invernadero in invernaderos_db:
-            invernadero_id = invernadero['id']
-
-            ultimos_datos[invernadero_id] = {
-                "nombre": invernadero['nombre'],
-                "temperatura": float(invernadero['temperatura']) if invernadero['temperatura'] is not None else None,
-                "humedad": int(invernadero['humedad']) if invernadero['humedad'] is not None else None,
-                "fecha": invernadero['fecha'].strftime('%Y-%m-%d %H:%M') if invernadero['fecha'] else "Sin datos",
-                "estado": estado_suelo(invernadero['humedad']) if invernadero['humedad'] is not None else "Sin datos",
-                "cantidad_claveles": invernadero['cantidad_claveles'] if invernadero['cantidad_claveles'] is not None else 0,
-                "encargado": invernadero['encargado'] if invernadero['encargado'] else "No asignado"
+        # Usar ultimas_lecturas de memoria si están disponibles, si no, cargar de DB
+        # Esto es para la vista general de invernaderos, que no necesita ser tan "real-time" como el detalle
+        # pero se beneficia de tener la última lectura disponible rápidamente.
+        final_datos_invernaderos = {}
+        for invernadero_db_row in invernaderos_db:
+            invernadero_id = invernadero_db_row['id']
+            
+            # Priorizar la lectura en memoria si existe y es más reciente
+            if invernadero_id in ultimas_lecturas and ultimas_lecturas[invernadero_id] is not None:
+                lectura_fuente = ultimas_lecturas[invernadero_id]
+            else:
+                lectura_fuente = {
+                    "temperatura": float(invernadero_db_row['temperatura']) if invernadero_db_row['temperatura'] is not None else None,
+                    "humedad": int(invernadero_db_row['humedad']) if invernadero_db_row['humedad'] is not None else None,
+                    "fecha": invernadero_db_row['fecha'] if invernadero_db_row['fecha'] else None
+                }
+            
+            final_datos_invernaderos[invernadero_id] = {
+                "nombre": invernadero_db_row['nombre'],
+                "temperatura": lectura_fuente['temperatura'],
+                "humedad": lectura_fuente['humedad'],
+                "fecha": lectura_fuente['fecha'].strftime('%Y-%m-%d %H:%M') if lectura_fuente['fecha'] else "Sin datos",
+                "estado": estado_suelo(lectura_fuente['humedad']) if lectura_fuente['humedad'] is not None else "Sin datos",
+                "cantidad_claveles": invernadero_db_row['cantidad_claveles'] if invernadero_db_row['cantidad_claveles'] is not None else 0,
+                "encargado": invernadero_db_row['encargado'] if invernadero_db_row['encargado'] else "No asignado"
             }
 
     except Exception as e:
@@ -1204,9 +1252,9 @@ def listar_invernaderos():
       </div>
       <div class="card-body">
         <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-4">
-    """.format(len(ultimos_datos))
+    """.format(len(final_datos_invernaderos))
 
-    for invernadero_id, datos in ultimos_datos.items():
+    for invernadero_id, datos in final_datos_invernaderos.items():
         color_badge = get_color_from_id(invernadero_id)
         temp = datos.get('temperatura')
         hum = datos.get('humedad')
@@ -1488,51 +1536,59 @@ def desactivar_asignacion():
 @app.route('/api/lecturas_realtime/<int:invernadero_id>')
 def lecturas_realtime(invernadero_id):
     """
-    Retorna la última lectura de un invernadero para actualizaciones en tiempo real.
+    Retorna la última lectura de un invernadero desde la memoria para actualizaciones en tiempo real.
+    También incluye información de SweetAlert2 si hay una alerta pendiente.
     """
-    try:
-        conn = get_db()
-        cursor = conn.cursor(dictionary=True)
+    # Obtener la última lectura de la memoria
+    ultima_lectura_memoria = ultimas_lecturas.get(invernadero_id)
 
-        cursor.execute("""
-            SELECT fecha, temperatura, humedad_suelo as humedad
-            FROM lecturas
-            WHERE invernadero_id = %s
-            ORDER BY fecha DESC
-            LIMIT 1
-        """, (invernadero_id,))
+    if ultima_lectura_memoria:
+        # Obtener el sweet_alert_info que pudo haberse generado al procesar la lectura
+        # Si no se generó uno, será None
+        sweet_alert_info = last_db_save_time.get(f"sweet_alert_{invernadero_id}", None)
+        
+        # Limpiar la alerta después de enviarla al frontend para que no se repita
+        if sweet_alert_info:
+            last_db_save_time[f"sweet_alert_{invernadero_id}"] = None
 
-        resultado = cursor.fetchone()
-        if resultado:
-            ultimas_lecturas[invernadero_id] = {
-                'fecha': resultado['fecha'],
-                'temperatura': float(resultado['temperatura']),
-                'humedad': int(resultado['humedad'])
-            }
-            
-            # Obtener el sweet_alert_info que pudo haberse generado al guardar la lectura
-            # Si no se generó uno, será None
-            sweet_alert_info = last_db_save_time.get(f"sweet_alert_{invernadero_id}", None)
-            # Limpiar la alerta después de enviarla al frontend
-            if sweet_alert_info:
-                last_db_save_time[f"sweet_alert_{invernadero_id}"] = None
+        return jsonify({
+            'fecha': ultima_lectura_memoria['fecha'].strftime('%Y-%m-%d %H:%M'),
+            'temperatura': float(ultima_lectura_memoria['temperatura']),
+            'humedad': int(ultima_lectura_memoria['humedad']),
+            'estado': estado_suelo(ultima_lectura_memoria['humedad']),
+            'sweet_alert': sweet_alert_info # Incluir la información de SweetAlert2
+        })
+    else:
+        # Si no hay datos en memoria, intentar obtener la última de la DB (para el caso de recarga o inicio)
+        try:
+            conn = get_db()
+            cursor = conn.cursor(dictionary=True)
 
+            cursor.execute("""
+                SELECT fecha, temperatura, humedad_suelo as humedad
+                FROM lecturas
+                WHERE invernadero_id = %s
+                ORDER BY fecha DESC
+                LIMIT 1
+            """, (invernadero_id,))
 
-            return jsonify({
-                'fecha': resultado['fecha'].strftime('%Y-%m-%d %H:%M'),
-                'temperatura': float(resultado['temperatura']),
-                'humedad': int(resultado['humedad']),
-                'estado': estado_suelo(resultado['humedad']),
-                'sweet_alert': sweet_alert_info # Incluir la información de SweetAlert2
-            })
-        else:
-            return jsonify({'error': 'No hay datos disponibles para este invernadero'}), 404
+            resultado = cursor.fetchone()
+            if resultado:
+                return jsonify({
+                    'fecha': resultado['fecha'].strftime('%Y-%m-%d %H:%M'),
+                    'temperatura': float(resultado['temperatura']),
+                    'humedad': int(resultado['humedad']),
+                    'estado': estado_suelo(resultado['humedad']),
+                    'sweet_alert': None # No hay alerta SweetAlert2 si viene de DB directamente
+                })
+            else:
+                return jsonify({'error': 'No hay datos disponibles para este invernadero'}), 404
 
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-    finally:
-        if 'conn' in locals() and conn.is_connected():
-            conn.close()
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+        finally:
+            if 'conn' in locals() and conn.is_connected():
+                conn.close()
 
 @app.route('/alertas')
 def alertas():
@@ -3942,31 +3998,27 @@ def enviar_alerta_whatsapp(mensaje):
 def asignar_lectura_automatica(invernadero_id, lectura):
     """
     Guarda una lectura en la base de datos para un invernadero específico
-    y genera alertas si las condiciones son críticas.
+    después de un número de lecturas y genera alertas si las condiciones son críticas.
     Retorna información para SweetAlert2 si se genera una alerta.
     """
-    global ultimas_alertas_temp, last_db_save_time
+    global ultimas_alertas_temp, last_db_save_time, reading_counts, ultimos_estados
     sweet_alert_info = None # Variable para almacenar la información de la alerta para SweetAlert2
 
     try:
         conn = get_db()
         cursor = conn.cursor()
 
-        current_time = datetime.now()
-        # Verificar si han pasado 2 minutos desde la última vez que se guardó para este invernadero
-        # La clave en last_db_save_time para el timestamp de guardado es el invernadero_id
-        if invernadero_id not in last_db_save_time or \
-           (current_time - last_db_save_time.get(invernadero_id, datetime.min)).total_seconds() >= 120: # 120 segundos = 2 minutos
-            
+        # Guardar en DB solo si se han recibido 12 lecturas (2 minutos)
+        if reading_counts.get(invernadero_id, 0) >= 12:
             cursor.execute("""
                 INSERT INTO lecturas (invernadero_id, temperatura, humedad_suelo, fecha)
                 VALUES (%s, %s, %s, %s)
             """, (invernadero_id, lectura['temperatura'], lectura['humedad'], lectura['fecha']))
             conn.commit()
-            last_db_save_time[invernadero_id] = current_time # Actualizar el tiempo de última guardada
-            print(f"Lectura guardada en DB para invernadero {invernadero_id} en {current_time}")
+            print(f"Lectura guardada en DB para invernadero {invernadero_id} después de 12 lecturas.")
+            reading_counts[invernadero_id] = 0 # Reiniciar el contador
 
-        # Lógica de alerta por temperatura
+        # Lógica de alerta por temperatura (se ejecuta con cada lectura)
         if lectura['temperatura'] > ALERT_TEMP:
             if not ultimas_alertas_temp.get(invernadero_id, False): # Evitar alertas repetidas
                 nombre_invernadero = INVERNADEROS.get(invernadero_id, f"Invernadero {invernadero_id}")
@@ -3994,7 +4046,7 @@ def asignar_lectura_automatica(invernadero_id, lectura):
         else:
             ultimas_alertas_temp[invernadero_id] = False
 
-        # Lógica de alerta por humedad del suelo
+        # Lógica de alerta por humedad del suelo (se ejecuta con cada lectura)
         estado_actual = estado_suelo(lectura['humedad'])
         estado_anterior = ultimos_estados.get(invernadero_id)
 
