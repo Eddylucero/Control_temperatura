@@ -1,5 +1,4 @@
 Flask
 mysql-connector-python
 requests
-# Si usas python-dotenv para variables de entorno (aunque dijiste que no, si cambias de opinión, agrégalo)
-# python-dotenv
+pytz
