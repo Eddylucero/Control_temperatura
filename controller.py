@@ -547,6 +547,8 @@ BASE_HTML = """
             icon = 'warning';
         } else if (tipo === 'suelo_seco') {
             icon = 'error';
+        } else if (tipo === 'multi_alerta') { // Nuevo tipo para múltiples alertas
+            icon = 'warning';
         }
 
         Swal.fire({
@@ -612,6 +614,11 @@ BASE_HTML = """
                     mostrarAlertaSweet(data.sweet_alert.tipo, data.sweet_alert.titulo, data.sweet_alert.mensaje);
                 }
 
+            } else if (data && data.error === 'No hay datos disponibles para este invernadero') {
+                // Si no hay datos, mantener el estado como conectado pero sin actualizar la tabla/gráficos
+                actualizarEstado(true); 
+            } else {
+                actualizarEstado(false);
             }
 
             // Sincronizar con historial completo periódicamente
@@ -3839,13 +3846,13 @@ def generar_reporte_diario():
                                         }
                                     }
                                 }
-                            },
-                            scales: {
-                                y: {
-                                    title: {
-                                        display: true,
-                                        text: 'Temperatura (°C)'
-                                    }
+                            }
+                        },
+                        scales: {
+                            y: {
+                                title: {
+                                    display: true,
+                                    text: 'Temperatura (°C)'
                                 }
                             }
                         }
@@ -3947,8 +3954,9 @@ def asignar_lectura_automatica(invernadero_id, lectura):
 
         current_time = datetime.now()
         # Verificar si han pasado 2 minutos desde la última vez que se guardó para este invernadero
+        # La clave en last_db_save_time para el timestamp de guardado es el invernadero_id
         if invernadero_id not in last_db_save_time or \
-           (current_time - last_db_save_time[invernadero_id]).total_seconds() >= 120: # 120 segundos = 2 minutos
+           (current_time - last_db_save_time.get(invernadero_id, datetime.min)).total_seconds() >= 120: # 120 segundos = 2 minutos
             
             cursor.execute("""
                 INSERT INTO lecturas (invernadero_id, temperatura, humedad_suelo, fecha)
@@ -4023,6 +4031,7 @@ def asignar_lectura_automatica(invernadero_id, lectura):
         ultimos_estados[invernadero_id] = estado_actual
         
         # Almacenar la información de SweetAlert2 para que sea recogida por lecturas_realtime
+        # La clave para la alerta de SweetAlert2 es diferente para evitar colisiones con el timestamp de guardado en DB
         last_db_save_time[f"sweet_alert_{invernadero_id}"] = sweet_alert_info
 
     except Exception as e:
