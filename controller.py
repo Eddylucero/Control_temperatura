@@ -2340,6 +2340,7 @@ def analisis_comparativo():
 
     analisis_json = json.dumps(analisis)
 
+    # Construir el contenido HTML
     content = f"""
     <div class="container-fluid px-4">
         <div class="d-flex justify-content-between align-items-center mb-4">
@@ -2520,7 +2521,7 @@ def analisis_comparativo():
                             </tr>
         """
 
-    content += f"""
+    content += """
                         </tbody>
                     </table>
                 </div>
@@ -2695,7 +2696,10 @@ def analisis_comparativo():
         // Pass the Python variable directly to a JavaScript variable
         window.analisisDataFromFlask = JSON.parse('{{ analisis_json | tojson }}');
     </script>
-    {% raw %}
+    """
+
+    # JavaScript para los gráficos
+    content += """
     <script>
         // Now access it from the global scope
         const analisisData = window.analisisDataFromFlask;
@@ -2845,7 +2849,10 @@ def analisis_comparativo():
             }
         });
     </script>
-    {% endraw %}
+    """
+
+    # Estilos CSS
+    content += """
     <style>
         .decision-tree {
             font-family: Arial, sans-serif;
@@ -2955,6 +2962,7 @@ def analisis_comparativo():
     """
 
     return render_template_string(BASE_HTML, title="Análisis Comparativo", content=content)
+
 
 @app.route('/generar-reporte', methods=['POST'])
 def generar_reporte():
@@ -3262,83 +3270,72 @@ def generar_reporte():
         <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         <script>
             // Pass the Python variable directly to a JavaScript variable
-            window.analisisDataFromFlask = JSON.parse('{{ analisis_json | tojson }}');
+            window.fechasReporte = {{ fechas | tojson }};
+            window.datosPorInvernaderoReporte = {{ datos_por_invernadero | tojson }};
         </script>
-        {% raw %}
+        {{'%'}} raw %}}
         <script>
             document.addEventListener('DOMContentLoaded', function() {
-                // Now access it from the global scope
-                const analisisData = window.analisisDataFromFlask;
+                const fechas = window.fechasReporte;
+                const datosPorInvernadero = window.datosPorInvernaderoReporte;
 
-                const tempData = {
-                    labels: [],
-                    minTemp: [],
-                    avgTemp: [],
-                    maxTemp: []
-                };
+                const datasetsTemp = [];
+                const datasetsHum = [];
 
-                const humedadData = {
-                    labels: [],
-                    minHum: [],
-                    avgHum: [],
-                    maxHum: []
-                };
+                const colores = [
+                    'rgb(255, 99, 132)',
+                    'rgb(54, 162, 235)',
+                    'rgb(255, 159, 64)',
+                    'rgb(75, 192, 192)',
+                    'rgb(153, 102, 255)',
+                    'rgb(255, 205, 86)'
+                ];
 
-                analisisData.forEach(inv => {
-                    tempData.labels.push(`Invernadero ${inv.invernadero_id}`);
-                    tempData.minTemp.push(inv.temp_min !== null ? inv.temp_min : null);
-                    tempData.avgTemp.push(inv.temp_promedio !== null ? inv.temp_promedio : null);
-                    tempData.maxTemp.push(inv.temp_max !== null ? inv.temp_max : null);
+                let colorIndex = 0;
+                for (const id in datosPorInvernadero) {
+                    if (datosPorInvernadero.hasOwnProperty(id)) {
+                        const datos = datosPorInvernadero[id];
+                        const color = colores[colorIndex % colores.length];
+                        colorIndex++;
 
-                    humedadData.labels.push(`Invernadero ${inv.invernadero_id}`);
-                    humedadData.minHum.push(inv.humedad_min !== null ? inv.humedad_min : null);
-                    humedadData.avgHum.push(inv.humedad_promedio !== null ? inv.humedad_promedio : null);
-                    humedadData.maxHum.push(inv.humedad_max !== null ? inv.humedad_max : null);
-                });
+                        datasetsTemp.push({
+                            label: `${datos.nombre} (ID: ${id})`,
+                            data: datos.temp_promedio,
+                            borderColor: color,
+                            backgroundColor: color.replace(')', ', 0.2)'),
+                            tension: 0.1,
+                            fill: false
+                        });
+
+                        datasetsHum.push({
+                            label: `${datos.nombre} (ID: ${id})`,
+                            data: datos.humedad_promedio,
+                            borderColor: color,
+                            backgroundColor: color.replace(')', ', 0.2)'),
+                            tension: 0.1,
+                            fill: false
+                        });
+                    }
+                }
 
                 const tempCtx = document.getElementById('tempChart').getContext('2d');
-                const tempChart = new Chart(tempCtx, {
-                    type: 'bar',
+                new Chart(tempCtx, {
+                    type: 'line',
                     data: {
-                        labels: tempData.labels,
-                        datasets: [
-                            {
-                                label: 'Temp. Mínima',
-                                data: tempData.minTemp,
-                                backgroundColor: 'rgba(54, 162, 235, 0.7)',
-                                borderColor: 'rgba(54, 162, 235, 1)',
-                                borderWidth: 1
-                            },
-                            {
-                                label: 'Temp. Promedio',
-                                data: tempData.avgTemp,
-                                backgroundColor: 'rgba(255, 159, 64, 0.7)',
-                                borderColor: 'rgba(255, 159, 64, 1)',
-                                borderWidth: 1
-                            },
-                            {
-                                label: 'Temp. Máxima',
-                                data: tempData.maxTemp,
-                                backgroundColor: 'rgba(255, 99, 132, 0.7)',
-                                borderColor: 'rgba(255, 99, 132, 1)',
-                                borderWidth: 1
-                            }
-                        ]
+                        labels: fechas,
+                        datasets: datasetsTemp
                     },
                     options: {
                         responsive: true,
-                        maintainAspectRatio: false,
                         plugins: {
                             title: {
                                 display: true,
-                                text: 'Comparación de Temperaturas'
+                                text: 'Evolución de Temperaturas'
                             },
                             tooltip: {
                                 callbacks: {
                                     label: function(context) {
-                                        let value = context.raw;
-                                        return context.dataset.label + ': ' +
-                                            (value !== null ? value.toFixed(1) + '°C' : 'N/A');
+                                        return `${context.dataset.label}: ${context.raw.toFixed(1)}°C`;
                                     }
                                 }
                             }
@@ -3348,56 +3345,30 @@ def generar_reporte():
                                 title: {
                                     display: true,
                                     text: 'Temperatura (°C)'
-                                },
-                                beginAtZero: false
+                                }
                             }
                         }
                     }
                 });
 
-                const humedadCtx = document.getElementById('humedadChart').getContext('2d');
-                const humedadChart = new Chart(humedadCtx, {
-                    type: 'bar',
+                const humCtx = document.getElementById('humedadChart').getContext('2d');
+                new Chart(humCtx, {
+                    type: 'line',
                     data: {
-                        labels: humedadData.labels,
-                        datasets: [
-                            {
-                                label: 'Humedad Mínima',
-                                data: humedadData.minHum,
-                                backgroundColor: 'rgba(75, 192, 192, 0.7)',
-                                borderColor: 'rgba(75, 192, 192, 1)',
-                                borderWidth: 1
-                            },
-                            {
-                                label: 'Humedad Promedio',
-                                data: humedadData.avgHum,
-                                backgroundColor: 'rgba(153, 102, 255, 0.7)',
-                                borderColor: 'rgba(153, 102, 255, 1)',
-                                borderWidth: 1
-                            },
-                            {
-                                label: 'Humedad Máxima',
-                                data: humedadData.maxHum,
-                                backgroundColor: 'rgba(255, 205, 86, 0.7)',
-                                borderColor: 'rgba(255, 205, 86, 1)',
-                                borderWidth: 1
-                            }
-                        ]
+                        labels: fechas,
+                        datasets: datasetsHum
                     },
                     options: {
                         responsive: true,
-                        maintainAspectRatio: false,
                         plugins: {
                             title: {
                                 display: true,
-                                text: 'Comparación de Humedad'
+                                text: 'Evolución de Humedad'
                             },
                             tooltip: {
                                 callbacks: {
                                     label: function(context) {
-                                        let value = context.raw;
-                                        return context.dataset.label + ': ' +
-                                            (value !== null ? value.toFixed(1) + '%' : 'N/A');
+                                        return `${context.dataset.label}: ${context.raw.toFixed(1)}%`;
                                     }
                                 }
                             },
@@ -3416,116 +3387,55 @@ def generar_reporte():
                 });
             });
         </script>
-        {% endraw %}
-    <style>
-        .decision-tree {
-            font-family: Arial, sans-serif;
-            margin: 20px 0;
-        }
+        {{'%'}} endraw %}}
+        <style>
+            /* Estos estilos ya están en el BASE_HTML para @media print */
+            /* Se repiten aquí solo para claridad sobre qué afecta el reporte */
+            @media print {
+                .navbar, button, a {
+                    display: none !important;
+                }
 
-        .node {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            position: relative;
-            margin: 0 10px;
-        }
+                body {
+                    padding: 0;
+                    font-size: 12pt;
+                }
 
-        .node-content {
-            padding: 10px 15px;
-            border-radius: 5px;
-            margin-bottom: 10px;
-            text-align: center;
-            min-width: 200px;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-            transition: all 0.3s ease;
-        }
+                .card {
+                    border: 1px solid #ddd;
+                    page-break-inside: avoid;
+                }
 
-        .node-content:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 4px 8px rgba(0,0,0,0.15);
-        }
+                .table {
+                    font-size: 10pt;
+                }
 
-        .children {
-            display: flex;
-            justify-content: center;
-            padding-top: 20px;
-            position: relative;
-        }
+                h1, h2, h3, h4, h5 {
+                    page-break-after: avoid;
+                }
 
-        .branch {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            position: relative;
-            padding: 0 20px;
-        }
+                .badge {
+                    color: #000 !important;
+                    border: 1px solid #000;
+                }
+            }
 
-        .branch:before {
-            content: '';
-            position: absolute;
-            top: 0;
-            height: 20px;
-            width: 1px;
-            background-color: #ccc;
-        }
+            .card-header {
+                background-color: #f8f9fa !important;
+            }
 
-        .leaf .node-content {
-            background-color: #f8f9fa;
-            border: 1px solid #dee2e6;
-        }
+            .flex-wrap {
+                display: flex;
+                flex-wrap: wrap;
+            }
 
-        .node.root {
-            margin-top: 0;
-        }
+            .gap-2 {
+                gap: 0.5rem;
+            }
+        </style>
+        """
 
-        .node.root .node-content {
-            font-weight: bold;
-            font-size: 1.1em;
-        }
-
-        /* Animaciones para el árbol */
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(10px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-
-        .node {
-            animation: fadeIn 0.5s ease-out;
-        }
-
-        /* Estilos para el modal */
-        .modal-header {
-            border-bottom: none;
-            padding-bottom: 0;
-        }
-
-        .modal-body h5 {
-            color: #0d6efd;
-            margin-top: 1rem;
-        }
-
-        .modal-body ul, .modal-body ol {
-            padding-left: 1.5rem;
-        }
-
-        .modal-body li {
-            margin-bottom: 0.5rem;
-        }
-
-        .table-sm th, .table-sm td {
-            padding: 0.5rem;
-        }
-
-        /* Estilos para el select múltiple */
-        .form-select[multiple] {
-            height: auto;
-            min-height: 120px;
-        }
-    </style>
-    """
-
-    return render_template_string(BASE_HTML, title="Reporte de Invernaderos", content=content)
+        return render_template_string(BASE_HTML, title="Reporte de Invernaderos", content=content)
 
     except Exception as e:
         flash(f"Error al generar el reporte: {str(e)}", "danger")
