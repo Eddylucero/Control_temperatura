@@ -28,10 +28,11 @@ def estado_suelo(humedad):
     """Determina el estado del suelo basado en el porcentaje de humedad."""
     if humedad is None:
         return "Sin datos"
-    if humedad < 60:
-        return "Seco"
     else:
-        return "Húmedo"
+        if humedad < 60:
+            return "Seco"
+        else:
+            return "Húmedo"
     
 def get_db():
     """Establece y retorna una conexión a la base de datos MySQL."""
@@ -1199,7 +1200,7 @@ def listar_invernaderos():
                 "fecha": ECUADOR_TIMEZONE.localize(invernadero['fecha']).strftime('%Y-%m-%d %H:%M') if invernadero['fecha'] else "Sin datos",
                 "estado": estado_suelo(invernadero['humedad']) if invernadero['humedad'] is not None else "Sin datos",
                 "cantidad_claveles": invernadero['cantidad_claveles'] if invernadero['cantidad_claveles'] is not None else 0,
-                "encargado": invernadero['encargado'] if invernadero['encargado'] else "No asignado"
+                "encargado": invernadero['encargado'] if invernadero['encargado'] is not None else "No asignado"
             }
 
     except Exception as e:
@@ -2472,7 +2473,7 @@ def analisis_comparativo():
 
         <div class="card shadow-sm mb-4">
             <div class="card-header bg-white">
-                <h5 class="mb-0"><i class="bi bi-clipboard2-data me-2"></i>Resumen Comparativo</div>
+                <h5 class="mb-0"><i class="bi bi-clipboard2-data me-2"></i>Resumen Comparativo</h5>
             </div>
             <div class="card-body p-0">
                 <div class="table-responsive">
@@ -3818,9 +3819,9 @@ def generar_reporte_diario():
             <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
             <script>
                 document.addEventListener('DOMContentLoaded', function() {
-                    const horas = """ + json.dumps(horas_labels) + """;
-                    const tempPromedio = """ + json.dumps(temp_promedio_data) + """;
-                    const humedadPromedio = """ + json.dumps(humedad_promedio_data) + """;
+                    const horas = {{ horas_labels | tojson }};
+                    const tempPromedio = {{ temp_promedio_data | tojson }};
+                    const humedadPromedio = {{ humedad_promedio_data | tojson }};
 
                     const colores = [
                         'rgb(255, 99, 132)',
@@ -3914,7 +3915,10 @@ def generar_reporte_diario():
         </div>
         """
 
-        return render_template_string(BASE_HTML, title="Reporte Diario", content=content)
+        return render_template_string(BASE_HTML, title="Reporte Diario", content=content,
+                                      horas_labels=horas_labels,
+                                      temp_promedio_data=temp_promedio_data,
+                                      humedad_promedio_data=humedad_promedio_data)
 
     except Exception as e:
         flash(f"Error al generar el reporte diario: {str(e)}", "danger")
