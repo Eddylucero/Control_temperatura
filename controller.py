@@ -509,37 +509,6 @@ BASE_HTML = """
       }
     }
 
-    // Función para actualizar gráficos
-    function actualizarGraficos(nuevosDatos) {
-      if (!nuevosDatos) return;
-
-      const hora = nuevosDatos.fecha.split(' ')[1];
-
-      // Actualizar gráfico de temperatura
-      if (tempChart) {
-        tempChart.data.labels.push(hora);
-        tempChart.data.datasets[0].data.push(nuevosDatos.temperatura);
-
-        if (tempChart.data.labels.length > 20) {
-          tempChart.data.labels.shift();
-          tempChart.data.datasets[0].data.shift();
-        }
-        tempChart.update('none'); // Animación más rápida
-      }
-
-      // Actualizar gráfico de humedad
-      if (humChart) {
-        humChart.data.labels.push(hora);
-        humChart.data.datasets[0].data.push(nuevosDatos.humedad);
-
-        if (humChart.data.labels.length > 20) {
-          humChart.data.labels.shift();
-          humChart.data.datasets[0].data.shift();
-        }
-        humChart.update('none'); // Animación más rápida
-      }
-    }
-
     // Variable para almacenar el estado de la última alerta mostrada (por invernadero)
     const lastAlertState = {};
 
@@ -3918,7 +3887,8 @@ def generar_reporte_diario():
         return render_template_string(BASE_HTML, title="Reporte Diario", content=content,
                                       horas_labels=horas_labels,
                                       temp_promedio_data=temp_promedio_data,
-                                      humedad_promedio_data=humedad_promedio_data)
+                                      humedad_promedio_data=humedad_promedio_data,
+                                      ALERT_TEMP=ALERT_TEMP) # Se agregó ALERT_TEMP aquí
 
     except Exception as e:
         flash(f"Error al generar el reporte diario: {str(e)}", "danger")
