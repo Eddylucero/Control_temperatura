@@ -109,6 +109,7 @@ BASE_HTML = """
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
+  <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script> <!-- SweetAlert2 CDN -->
   <style>
     /* Estilos generales para la visualización en pantalla */
     body {
@@ -452,8 +453,8 @@ BASE_HTML = """
     // Variables globales
     let tempChart, humChart;
     let lastHistorialUpdate = 0;
-    const updateInterval = 120000; // 2 minutos
-    const historialSyncInterval = 60000; // 60 segundos
+    const updateInterval = 10000; // 10 segundos
+    const historialSyncInterval = 60000; // 60 segundos (mantener para cargar historial completo periódicamente)
     let isUpdating = false;
 
     // Función para determinar estado del suelo
@@ -539,6 +540,33 @@ BASE_HTML = """
       }
     }
 
+    // Variable para almacenar el estado de la última alerta mostrada (por invernadero)
+    const lastAlertState = {};
+
+    // Función para mostrar alertas con SweetAlert2
+    function showAlert(invernaderoId, type, title, message) {
+        // Evitar mostrar la misma alerta repetidamente si ya se mostró para este invernadero
+        if (lastAlertState[invernaderoId] && lastAlertState[invernaderoId].type === type) {
+            return;
+        }
+
+        Swal.fire({
+            icon: type,
+            title: title,
+            text: message,
+            toast: true,
+            position: 'top-end',
+            showConfirmButton: false,
+            timer: 5000,
+            timerProgressBar: true,
+            didOpen: (toast) => {
+                toast.addEventListener('mouseenter', Swal.stopTimer)
+                toast.addEventListener('mouseleave', Swal.resumeTimer)
+            }
+        });
+        lastAlertState[invernaderoId] = { type: type, timestamp: Date.now() };
+    }
+
     // Función para cargar datos iniciales del historial
     async function cargarHistorialInicial() {
         try {
@@ -586,6 +614,25 @@ BASE_HTML = """
                 actualizarTabla(data);
                 actualizarGraficos(data);
                 actualizarEstado(true);
+
+                // Lógica de SweetAlert2 para temperatura
+                if (data.temperatura > {{ ALERT_TEMP }}) {
+                    showAlert(invernaderoId, 'warning', '¡Alerta de Temperatura!', `La temperatura ha subido a ${data.temperatura}°C en el invernadero ${invernaderoId}.`);
+                } else if (lastAlertState[invernaderoId] && lastAlertState[invernaderoId].type === 'warning') {
+                    // Si la temperatura vuelve a la normalidad, limpiar el estado de la alerta
+                    delete lastAlertState[invernaderoId];
+                }
+
+                // Lógica de SweetAlert2 para humedad
+                if (data.humedad < 60) { // Asumiendo 60% como umbral para "Seco"
+                    showAlert(invernaderoId, 'info', '¡Alerta de Humedad!', `La humedad ha bajado a ${data.humedad}% en el invernadero ${invernaderoId}. El suelo está seco.`);
+                } else if (lastAlertState[invernaderoId] && lastAlertState[invernaderoId].type === 'info') {
+                    // Si la humedad vuelve a la normalidad, limpiar el estado de la alerta
+                    delete lastAlertState[invernaderoId];
+                }
+
+            } else {
+                actualizarEstado(false);
             }
 
             // Sincronizar con historial completo periódicamente
@@ -682,7 +729,7 @@ BASE_HTML = """
             // Cargar datos iniciales y configurar actualización periódica
             cargarHistorialInicial();
 
-            // Actualizar cada segundo
+            // Actualizar cada 10 segundos
             setInterval(obtenerDatosRealtime, updateInterval);
 
             // Configurar evento para actualizar manualmente
@@ -3320,16 +3367,16 @@ def generar_reporte():
                                         return `${context.dataset.label}: ${context.raw.toFixed(1)}%`;
                                     }
                                 }
-                            }
-                        },
-                        scales: {
-                            y: {
-                                title: {
-                                    display: true,
-                                    text: 'Humedad (%)'
-                                },
-                                min: 0,
-                                max: 100
+                            },
+                            scales: {
+                                y: {
+                                    title: {
+                                        display: true,
+                                        text: 'Humedad (%)'
+                                    },
+                                    min: 0,
+                                    max: 100
+                                }
                             }
                         }
                     }
@@ -3797,7 +3844,6 @@ def generar_reporte_diario():
                                     callbacks: {
                                         label: function(context) {
                                             return `${context.dataset.label}: ${context.raw.toFixed(1)}°C`;
-                                        }
                                     }
                                 }
                             },
@@ -3840,16 +3886,16 @@ def generar_reporte_diario():
                                             return `${context.dataset.label}: ${context.raw.toFixed(1)}%`;
                                         }
                                     }
-                                }
-                            },
-                            scales: {
-                                y: {
-                                    title: {
-                                        display: true,
-                                        text: 'Humedad (%)'
-                                    },
-                                    min: 0,
-                                    max: 100
+                                },
+                                scales: {
+                                    y: {
+                                        title: {
+                                            display: true,
+                                            text: 'Humedad (%)'
+                                        },
+                                        min: 0,
+                                        max: 100
+                                    }
                                 }
                             }
                         }
@@ -3945,7 +3991,7 @@ def asignar_lectura_automatica(invernadero_id, lectura):
             """, (invernadero_id, "SUELO_SECO", mensaje_suelo_db, lectura['fecha']))
 
             if estado_actual == "Seco":
-                mensaje_suelo_whatsapp = f"""💧 *ALERTA DEL INVERNADERO NÚMERO {invernadero_id}*
+                mensaje_suelo_whatsapp = f"""� *ALERTA DEL INVERNADERO NÚMERO {invernadero_id}*
 *Invernadero*: {nombre_invernadero}
 *Tipo*: Suelo Seco
 *Descripción*: {mensaje_suelo_db}
