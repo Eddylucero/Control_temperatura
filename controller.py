@@ -16,13 +16,13 @@ INVERNADEROS = {}
 ALERT_TEMP = 25
 DESTINATION_WHATSAPP = "593983388182"
 
+# Definir la zona horaria de Ecuador
+ECUADOR_TIMEZONE = pytz.timezone("America/Guayaquil")
 
 USUARIOS = {
     "admin": "12345", 
     "usuario": "pass456"
 }
-
-
 
 def estado_suelo(humedad):
     """Determina el estado del suelo basado en el porcentaje de humedad."""
@@ -33,7 +33,6 @@ def estado_suelo(humedad):
     else:
         return "Húmedo"
     
-
 def get_db():
     """Establece y retorna una conexión a la base de datos MySQL."""
     return mysql.connector.connect(
@@ -43,6 +42,7 @@ def get_db():
         password="admin",
         database="db_invernadero"
     )
+
 def actualizar_invernaderos():
     """
     Actualiza la lista global de invernaderos desde la base de datos
@@ -67,13 +67,11 @@ def actualizar_invernaderos():
             ultimos_estados[id_nuevo] = None
             ultimas_alertas_temp[id_nuevo] = False
 
-
         # Eliminar invernaderos que ya no existen en la DB
         for id_eliminar in ids_actuales - nuevos_ids:
             ultimas_lecturas.pop(id_eliminar, None)
             ultimos_estados.pop(id_eliminar, None)
             ultimas_alertas_temp.pop(id_eliminar, None)
-
 
         INVERNADEROS = nuevos_invernaderos
 
@@ -106,6 +104,7 @@ BASE_HTML = """
 <html>
 <head>
   <title>{{ title }}</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8C%B1%3C/text%3E%3C/svg%3E">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
@@ -800,7 +799,7 @@ def recibir_lectura():
         return jsonify({"error": "Datos incompletos"}), 400
 
     nueva_lectura = {
-        'fecha': datetime.now(pytz.timezone("America/Guayaquil")),
+        'fecha': datetime.now(ECUADOR_TIMEZONE),
         'temperatura': float(data['temperatura']),
         'humedad': int(data['humedad_suelo'])
     }
@@ -834,8 +833,9 @@ def lecturas_historial(invernadero_id):
 
         lecturas.reverse()
 
+        # Asegurarse de que las fechas se formateen en la zona horaria de Ecuador
         return jsonify({
-            'labels': [lectura['fecha'].strftime('%Y-%m-%d %H:%M') for lectura in lecturas],
+            'labels': [ECUADOR_TIMEZONE.localize(lectura['fecha']).strftime('%Y-%m-%d %H:%M') for lectura in lecturas],
             'temperatura': [lectura['temperatura'] for lectura in lecturas],
             'humedad': [lectura['humedad'] for lectura in lecturas]
         })
@@ -865,10 +865,11 @@ def estado_invernadero(invernadero_id):
 
         resultado = cursor.fetchone()
         if resultado:
+            # Asegurarse de que la fecha se formatee en la zona horaria de Ecuador
             return jsonify({
                 'temperatura': float(resultado['temperatura']),
                 'humedad': int(resultado['humedad']),
-                'fecha': resultado['fecha'].strftime('%Y-%m-%d %H:%M'),
+                'fecha': ECUADOR_TIMEZONE.localize(resultado['fecha']).strftime('%Y-%m-%d %H:%M'),
                 'estado': estado_suelo(resultado['humedad']),
                 'alerta_temp': resultado['temperatura'] > ALERT_TEMP
             })
@@ -918,8 +919,9 @@ def home():
             tipo_text = "Suelo seco"
             unidad = "%"
 
-        fecha_alerta = alerta['fecha']
-        tiempo_transcurrido = datetime.now(pytz.timezone("America/Guayaquil")) - fecha_alerta
+        # Localizar la fecha de la alerta a la zona horaria de Ecuador
+        fecha_alerta_local = ECUADOR_TIMEZONE.localize(alerta['fecha'])
+        tiempo_transcurrido = datetime.now(ECUADOR_TIMEZONE) - fecha_alerta_local
         minutos = int(tiempo_transcurrido.total_seconds() / 60)
         horas = int(minutos / 60)
 
@@ -1193,7 +1195,8 @@ def listar_invernaderos():
                 "nombre": invernadero['nombre'],
                 "temperatura": float(invernadero['temperatura']) if invernadero['temperatura'] is not None else None,
                 "humedad": int(invernadero['humedad']) if invernadero['humedad'] is not None else None,
-                "fecha": invernadero['fecha'].strftime('%Y-%m-%d %H:%M') if invernadero['fecha'] else "Sin datos",
+                # Localizar la fecha a la zona horaria de Ecuador antes de formatear
+                "fecha": ECUADOR_TIMEZONE.localize(invernadero['fecha']).strftime('%Y-%m-%d %H:%M') if invernadero['fecha'] else "Sin datos",
                 "estado": estado_suelo(invernadero['humedad']) if invernadero['humedad'] is not None else "Sin datos",
                 "cantidad_claveles": invernadero['cantidad_claveles'] if invernadero['cantidad_claveles'] is not None else 0,
                 "encargado": invernadero['encargado'] if invernadero['encargado'] else "No asignado"
@@ -1413,9 +1416,11 @@ def detalle_invernadero(invernadero_id):
         estado = estado_suelo(lectura['humedad'])
         estado_class = 'text-warning' if estado == "Seco" else 'text-primary'
 
+        # Localizar la fecha a la zona horaria de Ecuador antes de formatear
+        fecha_formateada = ECUADOR_TIMEZONE.localize(lectura['fecha']).strftime('%Y-%m-%d %H:%M')
         tabla_lecturas += f"""
               <tr>
-                <td>{lectura['fecha'].strftime('%Y-%m-%d %H:%M')}</td>
+                <td>{fecha_formateada}</td>
                 <td class="{temp_class}">{lectura['temperatura']}</td>
                 <td>{lectura['humedad']}</td>
                 <td class="{estado_class}">{estado}</td>
@@ -1520,8 +1525,10 @@ def lecturas_realtime(invernadero_id):
                 'humedad': int(resultado['humedad'])
             }
 
+            # Localizar la fecha a la zona horaria de Ecuador antes de formatear
+            fecha_formateada = ECUADOR_TIMEZONE.localize(resultado['fecha']).strftime('%Y-%m-%d %H:%M')
             return jsonify({
-                'fecha': resultado['fecha'].strftime('%Y-%m-%d %H:%M'),
+                'fecha': fecha_formateada,
                 'temperatura': float(resultado['temperatura']),
                 'humedad': int(resultado['humedad']),
                 'estado': estado_suelo(resultado['humedad'])
@@ -1578,9 +1585,11 @@ def alertas():
 
     for alerta in alertas_db:
         nombre_invernadero = INVERNADEROS.get(alerta['invernadero_id'], f"Invernadero {alerta['invernadero_id']}")
+        # Localizar la fecha a la zona horaria de Ecuador antes de formatear
+        fecha_formateada = ECUADOR_TIMEZONE.localize(alerta['fecha']).strftime('%Y-%m-%d %H:%M')
         tabla += f"""
               <tr>
-                <td>{alerta['fecha'].strftime('%Y-%m-%d %H:%M')}</td>
+                <td>{fecha_formateada}</td>
                 <td>{nombre_invernadero}</td>
                 <td><span class="badge bg-danger">{alerta['tipo']}</span></td>
                 <td>{alerta['descripcion']}</td>
@@ -2155,8 +2164,8 @@ def analisis_comparativo():
 
         cursor.execute("SELECT MIN(DATE(fecha)) as min_date, MAX(DATE(fecha)) as max_date FROM lecturas")
         fechas_limite = cursor.fetchone()
-        fecha_minima = fechas_limite['min_date'].strftime('%Y-%m-%d') if fechas_limite['min_date'] else datetime.now(pytz.timezone("America/Guayaquil")).strftime('%Y-%m-%d')
-        fecha_maxima = fechas_limite['max_date'].strftime('%Y-%m-%d') if fechas_limite['max_date'] else datetime.now(pytz.timezone("America/Guayaquil")).strftime('%Y-%m-%d')
+        fecha_minima = fechas_limite['min_date'].strftime('%Y-%m-%d') if fechas_limite['min_date'] else datetime.now(ECUADOR_TIMEZONE).strftime('%Y-%m-%d')
+        fecha_maxima = fechas_limite['max_date'].strftime('%Y-%m-%d') if fechas_limite['max_date'] else datetime.now(ECUADOR_TIMEZONE).strftime('%Y-%m-%d')
 
         cursor.execute("""
             SELECT
@@ -2463,7 +2472,7 @@ def analisis_comparativo():
 
         <div class="card shadow-sm mb-4">
             <div class="card-header bg-white">
-                <h5 class="mb-0"><i class="bi bi-clipboard2-data me-2"></i>Resumen Comparativo</h5>
+                <h5 class="mb-0"><i class="bi bi-clipboard2-data me-2"></i>Resumen Comparativo</div>
             </div>
             <div class="card-body p-0">
                 <div class="table-responsive">
@@ -3117,7 +3126,7 @@ def generar_reporte():
                         </div>
                         <div class="col-md-6">
                             <p><strong>Fecha de fin:</strong> {fecha_fin}</p>
-                            <p><strong>Generado el:</strong> {datetime.now(pytz.timezone("America/Guayaquil")).strftime('%Y-%m-%d %H:%M')}</p>
+                            <p><strong>Generado el:</strong> {datetime.now(ECUADOR_TIMEZONE).strftime('%Y-%m-%d %H:%M')}</p>
                         </div>
                     </div>
                 </div>
@@ -3506,7 +3515,7 @@ def generar_reporte_diario():
         # Obtener el nombre del invernadero seleccionado
         nombre_invernadero = INVERNADEROS.get(invernadero_id, f"Invernadero {invernadero_id}")
 
-        fecha_actual = datetime.now(pytz.timezone("America/Guayaquil")).strftime('%Y-%m-%d')
+        fecha_actual = datetime.now(ECUADOR_TIMEZONE).strftime('%Y-%m-%d')
 
         conn = get_db()
         cursor = conn.cursor(dictionary=True)
@@ -3628,7 +3637,7 @@ def generar_reporte_diario():
                             <p><strong>Fecha:</strong> {fecha_actual}</p>
                         </div>
                         <div class="col-md-6">
-                            <p><strong>Generado el:</strong> {datetime.now(pytz.timezone("America/Guayaquil")).strftime('%Y-%m-%d %H:%M')}</p>
+                            <p><strong>Generado el:</strong> {datetime.now(ECUADOR_TIMEZONE).strftime('%Y-%m-%d %H:%M')}</p>
                         </div>
                     </div>
                 </div>
@@ -3991,7 +4000,7 @@ def asignar_lectura_automatica(invernadero_id, lectura):
             """, (invernadero_id, "SUELO_SECO", mensaje_suelo_db, lectura['fecha']))
 
             if estado_actual == "Seco":
-                mensaje_suelo_whatsapp = f"""� *ALERTA DEL INVERNADERO NÚMERO {invernadero_id}*
+                mensaje_suelo_whatsapp = f"""💧 *ALERTA DEL INVERNADERO NÚMERO {invernadero_id}*
 *Invernadero*: {nombre_invernadero}
 *Tipo*: Suelo Seco
 *Descripción*: {mensaje_suelo_db}
