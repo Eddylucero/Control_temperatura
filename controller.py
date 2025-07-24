@@ -491,6 +491,7 @@ BASE_HTML = """
 
       const estado = determinarEstado(datos.humedad);
       const estadoClass = getEstadoClass(estado);
+      // Corrección: Se agregó ALERT_TEMP después del operador de comparación '>'
       const tempClass = datos.temperatura > {{ ALERT_TEMP }} ? 'critical-temp' : '';
 
       const newRow = document.createElement('tr');
@@ -3788,6 +3789,7 @@ def generar_reporte_diario():
             <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
             <script>
                 document.addEventListener('DOMContentLoaded', function() {
+                    // Se utiliza | tojson para pasar las listas de Python a arrays JavaScript
                     const horas = {{ horas_labels | tojson }};
                     const tempPromedio = {{ temp_promedio_data | tojson }};
                     const humedadPromedio = {{ humedad_promedio_data | tojson }};
