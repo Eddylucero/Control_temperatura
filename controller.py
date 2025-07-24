@@ -919,7 +919,7 @@ def home():
             unidad = "%"
 
         fecha_alerta = alerta['fecha']
-        tiempo_transcurrido = datetime.now() - fecha_alerta
+        tiempo_transcurrido = datetime.now(pytz.timezone("America/Guayaquil")) - fecha_alerta
         minutos = int(tiempo_transcurrido.total_seconds() / 60)
         horas = int(minutos / 60)
 
@@ -2155,8 +2155,8 @@ def analisis_comparativo():
 
         cursor.execute("SELECT MIN(DATE(fecha)) as min_date, MAX(DATE(fecha)) as max_date FROM lecturas")
         fechas_limite = cursor.fetchone()
-        fecha_minima = fechas_limite['min_date'].strftime('%Y-%m-%d') if fechas_limite['min_date'] else datetime.now().strftime('%Y-%m-%d')
-        fecha_maxima = fechas_limite['max_date'].strftime('%Y-%m-%d') if fechas_limite['max_date'] else datetime.now().strftime('%Y-%m-%d')
+        fecha_minima = fechas_limite['min_date'].strftime('%Y-%m-%d') if fechas_limite['min_date'] else datetime.now(pytz.timezone("America/Guayaquil")).strftime('%Y-%m-%d')
+        fecha_maxima = fechas_limite['max_date'].strftime('%Y-%m-%d') if fechas_limite['max_date'] else datetime.now(pytz.timezone("America/Guayaquil")).strftime('%Y-%m-%d')
 
         cursor.execute("""
             SELECT
@@ -3117,7 +3117,7 @@ def generar_reporte():
                         </div>
                         <div class="col-md-6">
                             <p><strong>Fecha de fin:</strong> {fecha_fin}</p>
-                            <p><strong>Generado el:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
+                            <p><strong>Generado el:</strong> {datetime.now(pytz.timezone("America/Guayaquil")).strftime('%Y-%m-%d %H:%M')}</p>
                         </div>
                     </div>
                 </div>
@@ -3506,7 +3506,7 @@ def generar_reporte_diario():
         # Obtener el nombre del invernadero seleccionado
         nombre_invernadero = INVERNADEROS.get(invernadero_id, f"Invernadero {invernadero_id}")
 
-        fecha_actual = datetime.now().strftime('%Y-%m-%d')
+        fecha_actual = datetime.now(pytz.timezone("America/Guayaquil")).strftime('%Y-%m-%d')
 
         conn = get_db()
         cursor = conn.cursor(dictionary=True)
@@ -3628,7 +3628,7 @@ def generar_reporte_diario():
                             <p><strong>Fecha:</strong> {fecha_actual}</p>
                         </div>
                         <div class="col-md-6">
-                            <p><strong>Generado el:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
+                            <p><strong>Generado el:</strong> {datetime.now(pytz.timezone("America/Guayaquil")).strftime('%Y-%m-%d %H:%M')}</p>
                         </div>
                     </div>
                 </div>
