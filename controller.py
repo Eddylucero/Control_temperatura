@@ -20,20 +20,24 @@ DESTINATION_WHATSAPP = "593983388182"
 ECUADOR_TIMEZONE = pytz.timezone("America/Guayaquil")
 
 USUARIOS = {
-    "admin": "12345", 
+    "admin": "12345",
     "usuario": "pass456"
 }
+
+# Cola para almacenar alertas de SweetAlert2
+# Usamos deque para limitar el tamaño y evitar que crezca indefinidamente
+sweet_alert_queue = deque(maxlen=10)
 
 def estado_suelo(humedad):
     """Determina el estado del suelo basado en el porcentaje de humedad."""
     if humedad is None:
         return "Sin datos"
+    if humedad < 60:
+        return "Seco"
     else:
-        if humedad < 60:
-            return "Seco"
-        else:
-            return "Húmedo"
+        return "Húmedo"
     
+
 def get_db():
     """Establece y retorna una conexión a la base de datos MySQL."""
     return mysql.connector.connect(
@@ -43,7 +47,6 @@ def get_db():
         password="admin",
         database="db_invernadero"
     )
-
 def actualizar_invernaderos():
     """
     Actualiza la lista global de invernaderos desde la base de datos
@@ -85,7 +88,6 @@ def actualizar_invernaderos():
         ultimas_lecturas = {}
         ultimos_estados = {}
         ultimas_alertas_temp = {}
-        
     finally:
         if 'conn' in locals() and conn.is_connected():
             conn.close()
@@ -109,7 +111,8 @@ BASE_HTML = """
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
-  <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script> <!-- SweetAlert2 CDN -->
+  <!-- SweetAlert2 CSS y JS -->
+  <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
   <style>
     /* Estilos generales para la visualización en pantalla */
     body {
@@ -419,7 +422,8 @@ BASE_HTML = """
         li {
             margin-bottom: 3px;
         }
-    </style>
+    }
+  </style>
 
 </head>
 <body class="bg-light">
@@ -452,8 +456,8 @@ BASE_HTML = """
     // Variables globales
     let tempChart, humChart;
     let lastHistorialUpdate = 0;
-    const updateInterval = 10000; // 10 segundos
-    const historialSyncInterval = 60000; // 60 segundos (mantener para cargar historial completo periódicamente)
+    const updateInterval = 5000; // 5 segundos para actualizaciones más frecuentes
+    const historialSyncInterval = 30000; // 30 segundos para sincronizar historial
     let isUpdating = false;
 
     // Función para determinar estado del suelo
@@ -490,7 +494,6 @@ BASE_HTML = """
 
       const estado = determinarEstado(datos.humedad);
       const estadoClass = getEstadoClass(estado);
-      // Corrección: Se eliminó el espacio no imprimible y se agregó ALERT_TEMP
       const tempClass = datos.temperatura > {{ ALERT_TEMP }} ? 'critical-temp' : '';
 
       const newRow = document.createElement('tr');
@@ -509,31 +512,35 @@ BASE_HTML = """
       }
     }
 
-    // Variable para almacenar el estado de la última alerta mostrada (por invernadero)
-    const lastAlertState = {};
+    // Función para actualizar gráficos
+    function actualizarGraficos(nuevosDatos) {
+      if (!nuevosDatos) return;
 
-    // Función para mostrar alertas con SweetAlert2
-    function showAlert(invernaderoId, type, title, message) {
-        // Evitar mostrar la misma alerta repetidamente si ya se mostró para este invernadero
-        if (lastAlertState[invernaderoId] && lastAlertState[invernaderoId].type === type) {
-            return;
+      const hora = nuevosDatos.fecha.split(' ')[1];
+
+      // Actualizar gráfico de temperatura
+      if (tempChart) {
+        tempChart.data.labels.push(hora);
+        tempChart.data.datasets[0].data.push(nuevosDatos.temperatura);
+
+        if (tempChart.data.labels.length > 20) {
+          tempChart.data.labels.shift();
+          tempChart.data.datasets[0].data.shift();
         }
+        tempChart.update('none'); // Animación más rápida
+      }
 
-        Swal.fire({
-            icon: type,
-            title: title,
-            text: message,
-            toast: true,
-            position: 'top-end',
-            showConfirmButton: false,
-            timer: 5000,
-            timerProgressBar: true,
-            didOpen: (toast) => {
-                toast.addEventListener('mouseenter', Swal.stopTimer)
-                toast.addEventListener('mouseleave', Swal.resumeTimer)
-            }
-        });
-        lastAlertState[invernaderoId] = { type: type, timestamp: Date.now() };
+      // Actualizar gráfico de humedad
+      if (humChart) {
+        humChart.data.labels.push(hora);
+        humChart.data.datasets[0].data.push(nuevosDatos.humedad);
+
+        if (humChart.data.labels.length > 20) {
+          humChart.data.labels.shift();
+          humChart.data.datasets[0].data.shift();
+        }
+        humChart.update('none'); // Animación más rápida
+      }
     }
 
     // Función para cargar datos iniciales del historial
@@ -566,6 +573,47 @@ BASE_HTML = """
         }
     }
 
+    // Función para mostrar SweetAlert2
+    function mostrarSweetAlert(tipo, titulo, mensaje) {
+        let icon = 'info';
+        let color = '#3085d6'; // Azul por defecto
+
+        if (tipo === 'TEMP_ALTA') {
+            icon = 'warning';
+            color = '#f8bb86'; // Naranja
+        } else if (tipo === 'SUELO_SECO') {
+            icon = 'error';
+            color = '#d33'; // Rojo
+        }
+
+        Swal.fire({
+            title: titulo,
+            text: mensaje,
+            icon: icon,
+            confirmButtonText: 'Entendido',
+            confirmButtonColor: color,
+            timer: 8000, // La alerta se cierra automáticamente después de 8 segundos
+            timerProgressBar: true
+        });
+    }
+
+    // Función para obtener y mostrar alertas de SweetAlert2
+    async function obtenerAlertasSweetAlert() {
+        try {
+            const response = await fetch('/api/get_sweet_alerts');
+            const data = await response.json();
+
+            if (data && data.alerts && data.alerts.length > 0) {
+                data.alerts.forEach(alert => {
+                    mostrarSweetAlert(alert.tipo, alert.titulo, alert.mensaje);
+                });
+            }
+        } catch (error) {
+            console.error('Error al obtener alertas de SweetAlert:', error);
+        }
+    }
+
+
     // Función principal para obtener datos en tiempo real
     async function obtenerDatosRealtime() {
         if (isUpdating) return;
@@ -581,29 +629,8 @@ BASE_HTML = """
 
             if (data && !data.error) {
                 actualizarTabla(data);
-                // La función actualizarGraficos no está definida en el código proporcionado,
-                // si se necesita, debe ser implementada.
-                // actualizarGraficos(data); 
+                actualizarGraficos(data);
                 actualizarEstado(true);
-
-                // Lógica de SweetAlert2 para temperatura
-                if (data.temperatura > {{ ALERT_TEMP }}) {
-                    showAlert(invernaderoId, 'warning', '¡Alerta de Temperatura!', `La temperatura ha subido a ${data.temperatura}°C en el invernadero ${invernaderoId}.`);
-                } else if (lastAlertState[invernaderoId] && lastAlertState[invernaderoId].type === 'warning') {
-                    // Si la temperatura vuelve a la normalidad, limpiar el estado de la alerta
-                    delete lastAlertState[invernaderoId];
-                }
-
-                // Lógica de SweetAlert2 para humedad
-                if (data.humedad < 60) { // Asumiendo 60% como umbral para "Seco"
-                    showAlert(invernaderoId, 'info', '¡Alerta de Humedad!', `La humedad ha bajado a ${data.humedad}% en el invernadero ${invernaderoId}. El suelo está seco.`);
-                } else if (lastAlertState[invernaderoId] && lastAlertState[invernaderoId].type === 'info') {
-                    // Si la humedad vuelve a la normalidad, limpiar el estado de la alerta
-                    delete lastAlertState[invernaderoId];
-                }
-
-            } else {
-                actualizarEstado(false);
             }
 
             // Sincronizar con historial completo periódicamente
@@ -611,6 +638,10 @@ BASE_HTML = """
                 await cargarHistorialInicial();
                 lastHistorialUpdate = Date.now();
             }
+
+            // Obtener y mostrar alertas de SweetAlert2
+            await obtenerAlertasSweetAlert();
+
         } catch (error) {
             console.error('Error al obtener datos:', error);
             actualizarEstado(false);
@@ -700,7 +731,7 @@ BASE_HTML = """
             // Cargar datos iniciales y configurar actualización periódica
             cargarHistorialInicial();
 
-            // Actualizar cada 10 segundos
+            // Actualizar cada segundo
             setInterval(obtenerDatosRealtime, updateInterval);
 
             // Configurar evento para actualizar manualmente
@@ -805,9 +836,8 @@ def lecturas_historial(invernadero_id):
 
         lecturas.reverse()
 
-        # Asegurarse de que las fechas se formateen en la zona horaria de Ecuador
         return jsonify({
-            'labels': [ECUADOR_TIMEZONE.localize(lectura['fecha']).strftime('%Y-%m-%d %H:%M') for lectura in lecturas],
+            'labels': [lectura['fecha'].strftime('%Y-%m-%d %H:%M') for lectura in lecturas],
             'temperatura': [lectura['temperatura'] for lectura in lecturas],
             'humedad': [lectura['humedad'] for lectura in lecturas]
         })
@@ -837,11 +867,10 @@ def estado_invernadero(invernadero_id):
 
         resultado = cursor.fetchone()
         if resultado:
-            # Asegurarse de que la fecha se formatee en la zona horaria de Ecuador
             return jsonify({
                 'temperatura': float(resultado['temperatura']),
                 'humedad': int(resultado['humedad']),
-                'fecha': ECUADOR_TIMEZONE.localize(resultado['fecha']).strftime('%Y-%m-%d %H:%M'),
+                'fecha': resultado['fecha'].strftime('%Y-%m-%d %H:%M'),
                 'estado': estado_suelo(resultado['humedad']),
                 'alerta_temp': resultado['temperatura'] > ALERT_TEMP
             })
@@ -891,9 +920,8 @@ def home():
             tipo_text = "Suelo seco"
             unidad = "%"
 
-        # Localizar la fecha de la alerta a la zona horaria de Ecuador
-        fecha_alerta_local = ECUADOR_TIMEZONE.localize(alerta['fecha'])
-        tiempo_transcurrido = datetime.now(ECUADOR_TIMEZONE) - fecha_alerta_local
+        fecha_alerta = ECUADOR_TIMEZONE.localize(alerta['fecha'])
+        tiempo_transcurrido = datetime.now(ECUADOR_TIMEZONE) - fecha_alerta
         minutos = int(tiempo_transcurrido.total_seconds() / 60)
         horas = int(minutos / 60)
 
@@ -1167,11 +1195,10 @@ def listar_invernaderos():
                 "nombre": invernadero['nombre'],
                 "temperatura": float(invernadero['temperatura']) if invernadero['temperatura'] is not None else None,
                 "humedad": int(invernadero['humedad']) if invernadero['humedad'] is not None else None,
-                # Localizar la fecha a la zona horaria de Ecuador antes de formatear
-                "fecha": ECUADOR_TIMEZONE.localize(invernadero['fecha']).strftime('%Y-%m-%d %H:%M') if invernadero['fecha'] else "Sin datos",
+                "fecha": invernadero['fecha'].strftime('%Y-%m-%d %H:%M') if invernadero['fecha'] else "Sin datos",
                 "estado": estado_suelo(invernadero['humedad']) if invernadero['humedad'] is not None else "Sin datos",
                 "cantidad_claveles": invernadero['cantidad_claveles'] if invernadero['cantidad_claveles'] is not None else 0,
-                "encargado": invernadero['encargado'] if invernadero['encargado'] is not None else "No asignado"
+                "encargado": invernadero['encargado'] if invernadero['encargado'] else "No asignado"
             }
 
     except Exception as e:
@@ -1388,11 +1415,9 @@ def detalle_invernadero(invernadero_id):
         estado = estado_suelo(lectura['humedad'])
         estado_class = 'text-warning' if estado == "Seco" else 'text-primary'
 
-        # Localizar la fecha a la zona horaria de Ecuador antes de formatear
-        fecha_formateada = ECUADOR_TIMEZONE.localize(lectura['fecha']).strftime('%Y-%m-%d %H:%M')
         tabla_lecturas += f"""
               <tr>
-                <td>{fecha_formateada}</td>
+                <td>{lectura['fecha'].strftime('%Y-%m-%d %H:%M')}</td>
                 <td class="{temp_class}">{lectura['temperatura']}</td>
                 <td>{lectura['humedad']}</td>
                 <td class="{estado_class}">{estado}</td>
@@ -1497,10 +1522,8 @@ def lecturas_realtime(invernadero_id):
                 'humedad': int(resultado['humedad'])
             }
 
-            # Localizar la fecha a la zona horaria de Ecuador antes de formatear
-            fecha_formateada = ECUADOR_TIMEZONE.localize(resultado['fecha']).strftime('%Y-%m-%d %H:%M')
             return jsonify({
-                'fecha': fecha_formateada,
+                'fecha': resultado['fecha'].strftime('%Y-%m-%d %H:%M'),
                 'temperatura': float(resultado['temperatura']),
                 'humedad': int(resultado['humedad']),
                 'estado': estado_suelo(resultado['humedad'])
@@ -1513,6 +1536,17 @@ def lecturas_realtime(invernadero_id):
     finally:
         if 'conn' in locals() and conn.is_connected():
             conn.close()
+
+@app.route('/api/get_sweet_alerts')
+def get_sweet_alerts():
+    """
+    Endpoint para que el frontend obtenga las alertas de SweetAlert2 pendientes.
+    Vacía la cola después de enviar las alertas.
+    """
+    alerts_to_send = list(sweet_alert_queue)
+    sweet_alert_queue.clear() # Vaciar la cola después de enviarlas
+    return jsonify({"alerts": alerts_to_send})
+
 
 @app.route('/alertas')
 def alertas():
@@ -1557,11 +1591,9 @@ def alertas():
 
     for alerta in alertas_db:
         nombre_invernadero = INVERNADEROS.get(alerta['invernadero_id'], f"Invernadero {alerta['invernadero_id']}")
-        # Localizar la fecha a la zona horaria de Ecuador antes de formatear
-        fecha_formateada = ECUADOR_TIMEZONE.localize(alerta['fecha']).strftime('%Y-%m-%d %H:%M')
         tabla += f"""
               <tr>
-                <td>{fecha_formateada}</td>
+                <td>{alerta['fecha'].strftime('%Y-%m-%d %H:%M')}</td>
                 <td>{nombre_invernadero}</td>
                 <td><span class="badge bg-danger">{alerta['tipo']}</span></td>
                 <td>{alerta['descripcion']}</td>
@@ -2340,7 +2372,6 @@ def analisis_comparativo():
 
     analisis_json = json.dumps(analisis)
 
-    # Construir el contenido HTML
     content = f"""
     <div class="container-fluid px-4">
         <div class="d-flex justify-content-between align-items-center mb-4">
@@ -2521,7 +2552,7 @@ def analisis_comparativo():
                             </tr>
         """
 
-    content += """
+    content += f"""
                         </tbody>
                     </table>
                 </div>
@@ -2693,181 +2724,169 @@ def analisis_comparativo():
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
-        // Pass the Python variable directly to a JavaScript variable
-        window.analisisDataFromFlask = JSON.parse('{{ analisis_json | tojson }}');
-    </script>
-    """
+    const analisisData = JSON.parse('{analisis_json}');
 
-    # JavaScript para los gráficos
-    content += """
-    <script>
-        // Now access it from the global scope
-        const analisisData = window.analisisDataFromFlask;
+    const tempData = {{
+        labels: [],
+        minTemp: [],
+        avgTemp: [],
+        maxTemp: []
+    }};
 
-        const tempData = {
-            labels: [],
-            minTemp: [],
-            avgTemp: [],
-            maxTemp: []
-        };
+    const humedadData = {{
+        labels: [],
+        minHum: [],
+        avgHum: [],
+        maxHum: []
+    }};
 
-        const humedadData = {
-            labels: [],
-            minHum: [],
-            avgHum: [],
-            maxHum: []
-        };
+    analisisData.forEach(inv => {{
+        tempData.labels.push(`Invernadero ${{inv.invernadero_id}}`);
+        tempData.minTemp.push(inv.temp_min !== null ? inv.temp_min : null);
+        tempData.avgTemp.push(inv.temp_promedio !== null ? inv.temp_promedio : null);
+        tempData.maxTemp.push(inv.temp_max !== null ? inv.temp_max : null);
 
-        analisisData.forEach(inv => {
-            tempData.labels.push(`Invernadero ${inv.invernadero_id}`);
-            tempData.minTemp.push(inv.temp_min !== null ? inv.temp_min : null);
-            tempData.avgTemp.push(inv.temp_promedio !== null ? inv.temp_promedio : null);
-            tempData.maxTemp.push(inv.temp_max !== null ? inv.temp_max : null);
+        humedadData.labels.push(`Invernadero ${{inv.invernadero_id}}`);
+        humedadData.minHum.push(inv.humedad_min !== null ? inv.humedad_min : null);
+        humedadData.avgHum.push(inv.humedad_promedio !== null ? inv.humedad_promedio : null);
+        humedadData.maxHum.push(inv.humedad_max !== null ? inv.humedad_max : null);
+    }});
 
-            humedadData.labels.push(`Invernadero ${inv.invernadero_id}`);
-            humedadData.minHum.push(inv.humedad_min !== null ? inv.humedad_min : null);
-            humedadData.avgHum.push(inv.humedad_promedio !== null ? inv.humedad_promedio : null);
-            humedadData.maxHum.push(inv.humedad_max !== null ? inv.humedad_max : null);
-        });
-
-        const tempCtx = document.getElementById('tempChart').getContext('2d');
-        const tempChart = new Chart(tempCtx, {
-            type: 'bar',
-            data: {
-                labels: tempData.labels,
-                datasets: [
-                    {
-                        label: 'Temp. Mínima',
-                        data: tempData.minTemp,
-                        backgroundColor: 'rgba(54, 162, 235, 0.7)',
-                        borderColor: 'rgba(54, 162, 235, 1)',
-                        borderWidth: 1
-                    },
-                    {
-                        label: 'Temp. Promedio',
-                        data: tempData.avgTemp,
-                        backgroundColor: 'rgba(255, 159, 64, 0.7)',
-                        borderColor: 'rgba(255, 159, 64, 1)',
-                        borderWidth: 1
-                    },
-                    {
-                        label: 'Temp. Máxima',
-                        data: tempData.maxTemp,
-                        backgroundColor: 'rgba(255, 99, 132, 0.7)',
-                        borderColor: 'rgba(255, 99, 132, 1)',
-                        borderWidth: 1
-                    }
-                ]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                    title: {
+    const tempCtx = document.getElementById('tempChart').getContext('2d');
+    const tempChart = new Chart(tempCtx, {{
+        type: 'bar',
+        data: {{
+            labels: tempData.labels,
+            datasets: [
+                {{
+                    label: 'Temp. Mínima',
+                    data: tempData.minTemp,
+                    backgroundColor: 'rgba(54, 162, 235, 0.7)',
+                    borderColor: 'rgba(54, 162, 235, 1)',
+                    borderWidth: 1
+                }},
+                {{
+                    label: 'Temp. Promedio',
+                    data: tempData.avgTemp,
+                    backgroundColor: 'rgba(255, 159, 64, 0.7)',
+                    borderColor: 'rgba(255, 159, 64, 1)',
+                    borderWidth: 1
+                }},
+                {{
+                    label: 'Temp. Máxima',
+                    data: tempData.maxTemp,
+                    backgroundColor: 'rgba(255, 99, 132, 0.7)',
+                    borderColor: 'rgba(255, 99, 132, 1)',
+                    borderWidth: 1
+                }}
+            ]
+        }},
+        options: {{
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {{
+                title: {{
+                    display: true,
+                    text: 'Comparación de Temperaturas'
+                }},
+                tooltip: {{
+                    callbacks: {{
+                        label: function(context) {{
+                            let value = context.raw;
+                            return context.dataset.label + ': ' +
+                                (value !== null ? value.toFixed(1) + '°C' : 'N/A');
+                        }}
+                    }}
+                }}
+            }},
+            scales: {{
+                y: {{
+                    title: {{
                         display: true,
-                        text: 'Comparación de Temperaturas'
-                    },
-                    tooltip: {
-                        callbacks: {
-                            label: function(context) {
-                                let value = context.raw;
-                                return context.dataset.label + ': ' +
-                                    (value !== null ? value.toFixed(1) + '°C' : 'N/A');
-                            }
-                        }
-                    }
-                },
-                scales: {
-                    y: {
-                        title: {
-                            display: true,
-                            text: 'Temperatura (°C)'
-                        },
-                        beginAtZero: false
-                    }
-                }
-            }
-        });
+                        text: 'Temperatura (°C)'
+                    }},
+                    beginAtZero: false
+                }}
+            }}
+        }}
+    }});
 
-        const humedadCtx = document.getElementById('humedadChart').getContext('2d');
-        const humedadChart = new Chart(humedadCtx, {
-            type: 'bar',
-            data: {
-                labels: humedadData.labels,
-                datasets: [
-                    {
-                        label: 'Humedad Mínima',
-                        data: humedadData.minHum,
-                        backgroundColor: 'rgba(75, 192, 192, 0.7)',
-                        borderColor: 'rgba(75, 192, 192, 1)',
-                        borderWidth: 1
-                    },
-                    {
-                        label: 'Humedad Promedio',
-                        data: humedadData.avgHum,
-                        backgroundColor: 'rgba(153, 102, 255, 0.7)',
-                        borderColor: 'rgba(153, 102, 255, 1)',
-                        borderWidth: 1
-                    },
-                    {
-                        label: 'Humedad Máxima',
-                        data: humedadData.maxHum,
-                        backgroundColor: 'rgba(255, 205, 86, 0.7)',
-                        borderColor: 'rgba(255, 205, 86, 1)',
-                        borderWidth: 1
-                    }
-                ]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                    title: {
+    const humedadCtx = document.getElementById('humedadChart').getContext('2d');
+    const humedadChart = new Chart(humedadCtx, {{
+        type: 'bar',
+        data: {{
+            labels: humedadData.labels,
+            datasets: [
+                {{
+                    label: 'Humedad Mínima',
+                    data: humedadData.minHum,
+                    backgroundColor: 'rgba(75, 192, 192, 0.7)',
+                    borderColor: 'rgba(75, 192, 192, 1)',
+                    borderWidth: 1
+                }},
+                {{
+                    label: 'Humedad Promedio',
+                    data: humedadData.avgHum,
+                    backgroundColor: 'rgba(153, 102, 255, 0.7)',
+                    borderColor: 'rgba(153, 102, 255, 1)',
+                    borderWidth: 1
+                }},
+                {{
+                    label: 'Humedad Máxima',
+                    data: humedadData.maxHum,
+                    backgroundColor: 'rgba(255, 205, 86, 0.7)',
+                    borderColor: 'rgba(255, 205, 86, 1)',
+                    borderWidth: 1
+                }}
+            ]
+        }},
+        options: {{
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {{
+                title: {{
+                    display: true,
+                    text: 'Comparación de Humedad'
+                }},
+                tooltip: {{
+                    callbacks: {{
+                        label: function(context) {{
+                            let value = context.raw;
+                            return context.dataset.label + ': ' +
+                                (value !== null ? value.toFixed(1) + '%' : 'N/A');
+                        }}
+                    }}
+                }}
+            }},
+            scales: {{
+                y: {{
+                    title: {{
                         display: true,
-                        text: 'Comparación de Humedad'
-                    },
-                    tooltip: {
-                        callbacks: {
-                            label: function(context) {
-                                let value = context.raw;
-                                return context.dataset.label + ': ' +
-                                    (value !== null ? value.toFixed(1) + '%' : 'N/A');
-                            }
-                        }
-                    }
-                },
-                scales: {
-                    y: {
-                        title: {
-                            display: true,
-                            text: 'Humedad (%)'
-                        },
-                        min: 0,
-                        max: 100
-                    }
-                }
-            }
-        });
+                        text: 'Humedad (%)'
+                    }},
+                    min: 0,
+                    max: 100
+                }}
+            }}
+        }}
+    }});
     </script>
-    """
 
-    # Estilos CSS
-    content += """
     <style>
-        .decision-tree {
+        .decision-tree {{
             font-family: Arial, sans-serif;
             margin: 20px 0;
-        }
+        }}
 
-        .node {
+        .node {{
             display: flex;
             flex-direction: column;
             align-items: center;
             position: relative;
             margin: 0 10px;
-        }
+        }}
 
-        .node-content {
+        .node-content {{
             padding: 10px 15px;
             border-radius: 5px;
             margin-bottom: 10px;
@@ -2875,94 +2894,93 @@ def analisis_comparativo():
             min-width: 200px;
             box-shadow: 0 2px 5px rgba(0,0,0,0.1);
             transition: all 0.3s ease;
-        }
+        }}
 
-        .node-content:hover {
+        .node-content:hover {{
             transform: translateY(-2px);
             box-shadow: 0 4px 8px rgba(0,0,0,0.15);
-        }
+        }}
 
-        .children {
+        .children {{
             display: flex;
             justify-content: center;
             padding-top: 20px;
             position: relative;
-        }
+        }}
 
-        .branch {
+        .branch {{
             display: flex;
             flex-direction: column;
             align-items: center;
             position: relative;
             padding: 0 20px;
-        }
+        }}
 
-        .branch:before {
+        .branch:before {{
             content: '';
             position: absolute;
             top: 0;
             height: 20px;
             width: 1px;
             background-color: #ccc;
-        }
+        }}
 
-        .leaf .node-content {
+        .leaf .node-content {{
             background-color: #f8f9fa;
             border: 1px solid #dee2e6;
-        }
+        }}
 
-        .node.root {
+        .node.root {{
             margin-top: 0;
-        }
+        }}
 
-        .node.root .node-content {
+        .node.root .node-content {{
             font-weight: bold;
             font-size: 1.1em;
-        }
+        }}
 
         /* Animaciones para el árbol */
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(10px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
+        @keyframes fadeIn {{
+            from {{ opacity: 0; transform: translateY(10px); }}
+            to {{ opacity: 1; transform: translateY(0); }}
+        }}
 
-        .node {
+        .node {{
             animation: fadeIn 0.5s ease-out;
-        }
+        }}
 
         /* Estilos para el modal */
-        .modal-header {
+        .modal-header {{
             border-bottom: none;
             padding-bottom: 0;
-        }
+        }}
 
-        .modal-body h5 {
+        .modal-body h5 {{
             color: #0d6efd;
             margin-top: 1rem;
-        }
+        }}
 
-        .modal-body ul, .modal-body ol {
+        .modal-body ul, .modal-body ol {{
             padding-left: 1.5rem;
-        }
+        }}
 
-        .modal-body li {
+        .modal-body li {{
             margin-bottom: 0.5rem;
-        }
+        }}
 
-        .table-sm th, .table-sm td {
+        .table-sm th, .table-sm td {{
             padding: 0.5rem;
-        }
+        }}
 
         /* Estilos para el select múltiple */
-        .form-select[multiple] {
+        .form-select[multiple] {{
             height: auto;
             min-height: 120px;
-        }
+        }}
     </style>
     """
 
     return render_template_string(BASE_HTML, title="Análisis Comparativo", content=content)
-
 
 @app.route('/generar-reporte', methods=['POST'])
 def generar_reporte():
@@ -3269,16 +3287,8 @@ def generar_reporte():
         content += """
         <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         <script>
-            // Pass the Python variable directly to a JavaScript variable
-            window.fechasReporte = {{ fechas | tojson }};
-            window.datosPorInvernaderoReporte = {{ datos_por_invernadero | tojson }};
-        </script>
-        {{'%'}} raw %}}
-        <script>
             document.addEventListener('DOMContentLoaded', function() {
-                const fechas = window.fechasReporte;
-                const datosPorInvernadero = window.datosPorInvernaderoReporte;
-
+                const fechas = """ + json.dumps(fechas) + """;
                 const datasetsTemp = [];
                 const datasetsHum = [];
 
@@ -3291,31 +3301,30 @@ def generar_reporte():
                     'rgb(255, 205, 86)'
                 ];
 
+                const datosInvernaderos = """ + json.dumps(datos_por_invernadero) + """;
+
                 let colorIndex = 0;
-                for (const id in datosPorInvernadero) {
-                    if (datosPorInvernadero.hasOwnProperty(id)) {
-                        const datos = datosPorInvernadero[id];
-                        const color = colores[colorIndex % colores.length];
-                        colorIndex++;
+                for (const [id, datos] of Object.entries(datosInvernaderos)) {
+                    const color = colores[colorIndex % colores.length];
+                    colorIndex++;
 
-                        datasetsTemp.push({
-                            label: `${datos.nombre} (ID: ${id})`,
-                            data: datos.temp_promedio,
-                            borderColor: color,
-                            backgroundColor: color.replace(')', ', 0.2)'),
-                            tension: 0.1,
-                            fill: false
-                        });
+                    datasetsTemp.push({
+                        label: `${datos.nombre} (ID: ${id})`,
+                        data: datos.temp_promedio,
+                        borderColor: color,
+                        backgroundColor: color.replace(')', ', 0.2)'),
+                        tension: 0.1,
+                        fill: false
+                    });
 
-                        datasetsHum.push({
-                            label: `${datos.nombre} (ID: ${id})`,
-                            data: datos.humedad_promedio,
-                            borderColor: color,
-                            backgroundColor: color.replace(')', ', 0.2)'),
-                            tension: 0.1,
-                            fill: false
-                        });
-                    }
+                    datasetsHum.push({
+                        label: `${datos.nombre} (ID: ${id})`,
+                        data: datos.humedad_promedio,
+                        borderColor: color,
+                        backgroundColor: color.replace(')', ', 0.2)'),
+                        tension: 0.1,
+                        fill: false
+                    });
                 }
 
                 const tempCtx = document.getElementById('tempChart').getContext('2d');
@@ -3330,7 +3339,7 @@ def generar_reporte():
                         plugins: {
                             title: {
                                 display: true,
-                                text: 'Evolución de Temperaturas'
+                                text: 'Comparación de Temperaturas'
                             },
                             tooltip: {
                                 callbacks: {
@@ -3363,7 +3372,7 @@ def generar_reporte():
                         plugins: {
                             title: {
                                 display: true,
-                                text: 'Evolución de Humedad'
+                                text: 'Comparación de Humedad'
                             },
                             tooltip: {
                                 callbacks: {
@@ -3371,23 +3380,23 @@ def generar_reporte():
                                         return `${context.dataset.label}: ${context.raw.toFixed(1)}%`;
                                     }
                                 }
-                            },
-                            scales: {
-                                y: {
-                                    title: {
-                                        display: true,
-                                        text: 'Humedad (%)'
-                                    },
-                                    min: 0,
-                                    max: 100
-                                }
+                            }
+                        },
+                        scales: {
+                            y: {
+                                title: {
+                                    display: true,
+                                    text: 'Humedad (%)'
+                                },
+                                min: 0,
+                                max: 100
                             }
                         }
                     }
                 });
             });
         </script>
-        {{'%'}} endraw %}}
+
         <style>
             /* Estos estilos ya están en el BASE_HTML para @media print */
             /* Se repiten aquí solo para claridad sobre qué afecta el reporte */
@@ -3615,6 +3624,7 @@ def generar_reporte_diario():
                     <button class="btn btn-outline-primary me-2" onclick="window.print()">
                         <i class="bi bi-printer me-2"></i>Imprimir Reporte
                     </button>
+                    <br><br>
                     <a href="/seleccionar-invernadero-diario" class="btn btn-outline-secondary">
                         <i class="bi bi-arrow-left me-2"></i>Volver a Selección
                     </a>
@@ -3809,20 +3819,13 @@ def generar_reporte_diario():
                     </div>
                 </div>
             </div>
+
             <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
             <script>
-                // Pass the Python variables directly to JavaScript variables
-                window.horasLabelsFromFlask = {{ horas_labels | tojson }};
-                window.tempPromedioDataFromFlask = {{ temp_promedio_data | tojson }};
-                window.humedadPromedioDataFromFlask = {{ humedad_promedio_data | tojson }};
-            </script>
-            {% raw %}
-            <script>
                 document.addEventListener('DOMContentLoaded', function() {
-                    // Access them from the global scope
-                    const horas = window.horasLabelsFromFlask;
-                    const tempPromedio = window.tempPromedioDataFromFlask;
-                    const humedadPromedio = window.humedadPromedioDataFromFlask;
+                    const horas = """ + json.dumps(horas_labels) + """;
+                    const tempPromedio = """ + json.dumps(temp_promedio_data) + """;
+                    const humedadPromedio = """ + json.dumps(humedad_promedio_data) + """;
 
                     const colores = [
                         'rgb(255, 99, 132)',
@@ -3855,6 +3858,7 @@ def generar_reporte_diario():
                                     callbacks: {
                                         label: function(context) {
                                             return `${context.dataset.label}: ${context.raw.toFixed(1)}°C`;
+                                        }
                                     }
                                 }
                             },
@@ -3897,31 +3901,26 @@ def generar_reporte_diario():
                                             return `${context.dataset.label}: ${context.raw.toFixed(1)}%`;
                                         }
                                     }
-                                },
-                                scales: {
-                                    y: {
-                                        title: {
-                                            display: true,
-                                            text: 'Humedad (%)'
-                                        },
-                                        min: 0,
-                                        max: 100
-                                    }
+                                }
+                            },
+                            scales: {
+                                y: {
+                                    title: {
+                                        display: true,
+                                        text: 'Humedad (%)'
+                                    },
+                                    min: 0,
+                                    max: 100
                                 }
                             }
                         }
                     });
                 });
             </script>
-            {% endraw %}
         </div>
         """
 
-        return render_template_string(BASE_HTML, title="Reporte Diario", content=content,
-                                      horas_labels=horas_labels,
-                                      temp_promedio_data=temp_promedio_data,
-                                      humedad_promedio_data=humedad_promedio_data,
-                                      ALERT_TEMP=ALERT_TEMP) # Se agregó ALERT_TEMP aquí
+        return render_template_string(BASE_HTML, title="Reporte Diario", content=content)
 
     except Exception as e:
         flash(f"Error al generar el reporte diario: {str(e)}", "danger")
@@ -3960,7 +3959,7 @@ def asignar_lectura_automatica(invernadero_id, lectura):
     Guarda una lectura en la base de datos para un invernadero específico
     y genera alertas si las condiciones son críticas.
     """
-    global ultimas_alertas_temp
+    global ultimas_alertas_temp, sweet_alert_queue
 
     try:
         conn = get_db()
@@ -3989,6 +3988,13 @@ def asignar_lectura_automatica(invernadero_id, lectura):
 *Fecha*: {lectura['fecha'].strftime('%Y-%m-%d %H:%M:%S')}"""
                 enviar_alerta_whatsapp(mensaje_whatsapp)
 
+                # Agregar alerta a la cola para SweetAlert2
+                sweet_alert_queue.append({
+                    "tipo": "TEMP_ALTA",
+                    "titulo": f"¡Alerta de Temperatura en {nombre_invernadero}!",
+                    "mensaje": f"Se ha detectado una temperatura de {lectura['temperatura']}°C. ¡Actúa ahora!"
+                })
+
                 ultimas_alertas_temp[invernadero_id] = True
         else:
             ultimas_alertas_temp[invernadero_id] = False
@@ -4013,6 +4019,13 @@ def asignar_lectura_automatica(invernadero_id, lectura):
 *Descripción*: {mensaje_suelo_db}
 *Fecha*: {lectura['fecha'].strftime('%Y-%m-%d %H:%M:%S')}"""
                 enviar_alerta_whatsapp(mensaje_suelo_whatsapp)
+
+                # Agregar alerta a la cola para SweetAlert2
+                sweet_alert_queue.append({
+                    "tipo": "SUELO_SECO",
+                    "titulo": f"¡Alerta de Humedad en {nombre_invernadero}!",
+                    "mensaje": f"El suelo está seco con {lectura['humedad']}%. ¡Necesita riego!"
+                })
 
         ultimos_estados[invernadero_id] = estado_actual
         conn.commit()
